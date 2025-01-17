@@ -1266,9 +1266,28 @@ map<string, UBuffer> build_buffers(prog& prg, umap* opt_sched) {
 map<string, UBuffer> build_buffers(prog& prg, umap* opt_sched, schedule_info & hwinfo) {
   int usuffix = 0;
 
+  cout << "Build Buffers...begin" << endl;
+  prg.pretty_print();
+  cout << endl;
+  isl_ctx* isl_ctx_here = isl_union_map_get_ctx(opt_sched);
+  isl_printer* p = isl_printer_to_file(isl_ctx_here, stdout);
+  isl_printer_print_union_map(p, opt_sched);
+  cout << endl;
+  cout << "Printing some schedule info..." << endl;
+  cout << hwinfo.dse_compute_filename << endl;
+
   map<string, UBuffer> buffers;
   auto domains = prg.domains();
   auto all_op = prg.all_ops();
+
+  cout << endl;
+
+  cout << "Printing all domains..." << endl;
+  for (auto dom : domains) {
+    cout << dom.first->name << endl;
+    isl_printer_print_union_set(p, to_uset(dom.second));
+    cout << endl;
+  }
 
   //sort all ops by its name instead of ptr addres
   //to avoid uncertainty in buffer name
@@ -1332,7 +1351,7 @@ map<string, UBuffer> build_buffers(prog& prg, umap* opt_sched, schedule_info & h
       usuffix++;
     }
 
-    map<string, int> mem_port_cnt; 
+    map<string, int> mem_port_cnt;
     for (auto consumed : op->consume_locs_pair) {
       string name = consumed.first;
 
@@ -1419,7 +1438,7 @@ map<string, UBuffer> build_buffers(prog& prg, umap* opt_sched, schedule_info & h
 
       int slack = hwinfo.get_compute_inpt_slack(op, name, mem_port_cnt.at(name));
       cout << "origin sched: " << str(origin_sched) << endl;;
-      isl_map* outpt_sched = linear_schedule(origin_sched, {1}, slack, false);  
+      isl_map* outpt_sched = linear_schedule(origin_sched, {1}, slack, false);
 
       buf.add_out_pt(pt_name, domains.at(op), consumed_here, to_umap(outpt_sched));
 
@@ -1435,6 +1454,8 @@ map<string, UBuffer> build_buffers(prog& prg, umap* opt_sched, schedule_info & h
       usuffix++;
     }
   }
+
+  cout << "Build Buffers...end" << endl;
 
   return buffers;
 }

@@ -5121,6 +5121,8 @@ umap* prog::validity_deps() {
   map<op*, isl_set*> domains = this->domains();
   map<op*, isl_map*> schedules = this->schedules();
   vector<umap*> validity_dep_maps;
+  // std::cout << str(schedules) << std::endl;
+  // exit(1);
   for (auto b : all_buffers(*this)) {
     cout << "Computing validity deps for " << b << endl;
 

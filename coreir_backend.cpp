@@ -2,7 +2,7 @@
 #include "lake_target.h"
 
 #include <set>
-
+#define COREIR 1
 #ifdef COREIR
 #include "cwlib.h"
 #include "cgralib.h"
@@ -2788,8 +2788,10 @@ CoreIR::Module*  generate_coreir_without_ctrl(CodegenOptions& options,
     //if (!contains(buf.first, "input_glb")) {
     //    continue;
     //}
+    // All non-boundary buffers (have inputs and outputs in the application)
     if (!prg.is_boundary(buf.first)) {
       //all the memory optimization pass goes here
+      cout << "MADE IT HERE" << endl;
       auto impl = generate_optimized_memory_implementation(options, buf.second, prg, hwinfo);
 
       lower_to_garnet_implementation(options, buf.second, impl, hwinfo);
@@ -2816,6 +2818,22 @@ CoreIR::Module*  generate_coreir_without_ctrl(CodegenOptions& options,
       //}
     }
   }
+
+  // Should have final buffers here...let's check out their schedules...
+  cout << "Printing finals buffers???? (1)" << endl;
+  for (auto & buf : buffers) {
+    cout << "Buffer: " << buf.first << endl;
+    auto bctx = buf.second.ctx;
+    isl_printer* p = isl_printer_to_file(bctx, stdout);
+    auto buf_glb_sched_umap = buf.second.global_schedule();
+    // cout << "Schedule: " << buf.second.global_schedule() << endl;
+    isl_printer_print_union_map(p, buf_glb_sched_umap);
+    cout << endl;
+  }
+
+  cout << "AFTER BUFFER OPT" << endl;
+  prg.pretty_print();
+  cout << "AFTER PRETTY PRINT" << endl;
 
   auto levels = get_variable_levels(prg);
   // Connect compute units to buffers
@@ -2951,12 +2969,38 @@ CoreIR::Module*  generate_coreir_without_ctrl(CodegenOptions& options,
     }
   }
 
+  // Should have final buffers here...let's check out their schedules...
+  cout << "Printing finals buffers???? (2)" << endl;
+  for (auto & buf : buffers) {
+    cout << "Buffer: " << buf.first << endl;
+    auto bctx = buf.second.ctx;
+    isl_printer* p = isl_printer_to_file(bctx, stdout);
+    auto buf_glb_sched_umap = buf.second.global_schedule();
+    // cout << "Schedule: " << buf.second.global_schedule() << endl;
+    isl_printer_print_union_map(p, buf_glb_sched_umap);
+    cout << endl;
+  }
+
   generate_controller_for_compute_share(options, def, sched_maps, hwinfo, prg);
   generate_mux_for_compute_share(def, buffers, hwinfo, prg);
 
+  // Should have final buffers here...let's check out their schedules...
+  cout << "Printing finals buffers???? (3)" << endl;
+  for (auto & buf : buffers) {
+    cout << "Buffer: " << buf.first << endl;
+    auto bctx = buf.second.ctx;
+    isl_printer* p = isl_printer_to_file(bctx, stdout);
+    auto buf_glb_sched_umap = buf.second.global_schedule();
+    // cout << "Schedule: " << buf.second.global_schedule() << endl;
+    isl_printer_print_union_map(p, buf_glb_sched_umap);
+    cout << endl;
+  }
+
   ub->setDef(def);
 
+  cout << "Printing ub->print()" << endl;
   ub->print();
+  cout << "after that..." << endl;
 
   //connect_signal("reset", ub);
   //context->runPasses({"wireclocks-coreir"});
@@ -5415,12 +5459,17 @@ void generate_coreir_without_ctrl(CodegenOptions& options,
 
   prg_mod = generate_coreir_without_ctrl(options, buffers, prg, schedmap, context, hwinfo, dse_compute_filename);
 
+  cout << "AFTER generate_coreir_without_ctrl..." << endl;
+  cout << "Saving to json..." << endl;
+
 
   auto ns = context->getNamespace("global");
   if(!saveToFile(ns, options.dir + prg.name + ".json", prg_mod)) {
     cout << "Could not save ubuffer coreir" << endl;
     context->die();
   }
+
+  cout << "BEFORE PASSES" << endl;
 
   map_memory(options, prg_mod, buffers, true);
 
@@ -5450,6 +5499,7 @@ void generate_coreir_without_ctrl(CodegenOptions& options,
     cout << "Could not save ubuffer coreir" << endl;
     context->die();
   }
+  cout << "AFTER PASSES" << endl;
 
   deleteContext(context);
 }

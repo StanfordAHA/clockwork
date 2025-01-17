@@ -1,6 +1,7 @@
 #include "ubuffer.h"
 #include "codegen.h"
 #include "app.h"
+#define COREIR 1
 #ifdef COREIR
 #include "cwlib.h"
 #include "cgralib.h"
@@ -950,11 +951,22 @@ map<string, UBuffer> UBuffer::generate_ubuffer(CodegenOptions& options) {
 }
 
 isl_union_map* global_schedule_from_buffers(const map<string, UBuffer> &buffers) {
+    int i_ = 0;
     isl_ctx* ctx = pick(buffers).second.ctx;
+
+    isl_printer* p = isl_printer_to_file(ctx, stdout);
+
     isl_union_map* global_sched = isl_union_map_read_from_str(ctx, "{}");
     for (auto it : buffers) {
         auto buf = it.second;
+        cout << "On buffer " << str(i_) << " : " << buf.name << endl;
+        isl_printer_print_union_map(p, buf.global_schedule());
+        cout << endl;
+        cout << "Printing the global schedule: " << endl;
         global_sched = unn(buf.global_schedule(), global_sched);
+        isl_printer_print_union_map(p, global_sched);
+        cout << endl;
+        i_ += 1;
     }
     cout << "Global schedule: " << str(global_sched) << endl;
     return global_sched;
@@ -5190,7 +5202,7 @@ void UBuffer::generate_coreir(CodegenOptions& options,
   CoreIR::Module* generate_coreir_without_ctrl(CodegenOptions& options, CoreIR::Context* context, UBuffer& buf, UBufferImpl & impl, schedule_info& hwinfo) {
     auto ns = context->getNamespace("global");
 
-    vector<pair<string, CoreIR::Type*> >
+    vector<pair<string, CoreIR::Type*>>
       ub_field{{"clk", context->Named("coreir.clkIn")},
           {"flush", context->BitIn()},
           //{"rst_n", context->BitIn()}};
@@ -12246,10 +12258,15 @@ UBufferImpl generate_optimized_memory_implementation(
     //TODO: possible bug to comment out
     //if (prg.is_boundary(buf.name))
     //    return impl;
-
+    cout << "generate_optimized_memory_implementation" << endl;
+    cout << "Buffer: " << buf.name << endl;
+    auto isl_ctx_buf = buf.ctx;
+    isl_printer* p = isl_printer_to_file(isl_ctx_buf, stdout);
+    isl_printer_print_union_map(p, buf.global_schedule());
+    cout << endl;
 
     //create ubufferimpl from analysis ubuffer data structure
-
+    cout << "PRE SHIFT REGISTER OPTIMIZATION: " << endl;
     cout << "create shift register for " << buf << endl;
     auto impl = port_group2bank(options, prg, buf, hwinfo);
     cout << impl << endl;
@@ -12259,6 +12276,11 @@ UBufferImpl generate_optimized_memory_implementation(
     cout << "After shift register optimization: " << impl << endl;
     cout << "Done ports: " << done_outpt << endl;
     cout << "reduced buffer: " << new_buf << endl;
+
+    // After reduction
+    cout << "REDUCED BUFF" << endl;
+      isl_printer_print_union_map(p, new_buf.global_schedule());
+    cout << endl;
 
     if (!impl.is_pure_shift_register(new_buf.get_out_ports()))
         generate_banks_garnet(options, new_buf, impl, hwinfo);
