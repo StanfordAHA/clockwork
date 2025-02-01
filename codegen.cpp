@@ -1256,6 +1256,11 @@ map<string, UBuffer> build_buffers(prog& prg, umap* opt_sched) {
       for_each(inpt.begin(), inpt.end(), [](string pt_name){cout <<"\t" << pt_name;});
       cout << endl;
 
+      vector<string> inpt2 = buf.get_in_ports();
+      cout << "current out port name2: " << endl;
+      for_each(inpt2.begin(), inpt2.end(), [](string pt_name){cout <<"\t" << pt_name;});
+      cout << endl;
+
       usuffix++;
     }
   }

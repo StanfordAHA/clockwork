@@ -1197,6 +1197,16 @@ void UBufferImpl::merge_banks_and_rewrite(vector<int> & banks_tobe_merged, bool 
     target_buffers.push_back(lowering_info.at(bank_id).target_buf);
   }
 
+  isl_ctx* buf_ctx = nullptr;
+
+  for(auto it: target_buffers) {
+    cout << "PRINTING MERGE AND REWRITE TARGET BUFFER" << endl;
+    buf_ctx = it.ctx;
+    isl_printer* p = isl_printer_to_file(buf_ctx, stdout);
+    isl_printer_print_union_map(p, it.global_schedule());
+    cout << endl;
+  }
+
   //TODO check the other impl are the same
   GarnetImpl merged_impl;
   int bank_id_0 = pick(banks_tobe_merged);
@@ -1232,9 +1242,27 @@ void UBufferImpl::merge_banks_and_rewrite(vector<int> & banks_tobe_merged, bool 
   //Also merge target buffer
   merged_impl.target_buf = merge_buf_with_different_outpt(target_buffers, new_sram_name);
 
+  cout << "TARGET BUFFER AFTER MERGE" << endl;
+  // auto buf_ctx = merged_impl.target_buf.ctx;
+  isl_printer* p = isl_printer_to_file(buf_ctx, stdout);
+  cout << "Try printing merged glob sched..." << endl;
+  // cout << merged_impl.target_buf.global_schedule() << endl;
+  // cout << str(merged_impl) << endl;
+  cout << endl;
+  // isl_printer_print_union_map(p, merged_impl.target_buf.global_schedule());
+  // cout << endl;
 
   merged_impl.sub_component.insert({new_sram_name, sram_merged});
   auto stmt2sched = sram_merged.get_stmt2sched();
+
+  cout << "STATEMENT 2 SCHEDULE" << endl;
+  for (auto it: stmt2sched) {
+    cout << it.first << endl;
+    auto isl_ctx_here = isl_union_map_get_ctx(it.second);
+    isl_printer* p = isl_printer_to_file(isl_ctx_here, stdout);
+    isl_printer_print_union_map(p, it.second);
+    cout << endl;
+  }
 
   int tb_cnt = 0;
   int agg_cnt = 0;
@@ -1296,9 +1324,11 @@ void UBufferImpl::merge_banks_and_rewrite(vector<int> & banks_tobe_merged, bool 
       remove_bank(bk);
   }
   lowering_info[new_bk] = merged_impl;
+  cout << "MERGE BEFORE PRINT" << endl;
 
   cout << *this << endl;
 
+  cout << "MERGE AFTER PRINT" << endl;
   //TODO: add new banks sub component
 
 }
@@ -1396,6 +1426,10 @@ void UBufferImpl::bank_merging_and_rewrite(CodegenOptions & options) {
 
   int max_inpt = options.mem_hierarchy.at("mem").get_inpt_num();
   int max_outpt = options.mem_hierarchy.at("mem").get_outpt_num();
+
+  cout << "MAX INPUT: " << max_inpt << endl;
+  cout << "MAX OUTPUT: " << max_outpt << endl;
+
   for (auto it: bank_rddom) {
     int bank_id = it.first;
     cout << "bank id: " << bank_id << endl;
@@ -1406,7 +1440,7 @@ void UBufferImpl::bank_merging_and_rewrite(CodegenOptions & options) {
         continue;
 
 
-    //cout << "BANK ID: " << bank_id << "\n\tbank_map:" << str(it.second) << endl;
+    cout << "BANK ID: " << bank_id << "\n\tbank_map:" << str(it.second) << endl;
 
     //Not merge this buffer if it decouple the control or
     //need shift register optimization
@@ -1420,6 +1454,7 @@ void UBufferImpl::bank_merging_and_rewrite(CodegenOptions & options) {
         continue;
     }
 
+    // Checks some bounds and checks that the domains are the same, which allows these banks to be merged!
     if ((bank_readers.at(bank_id).size() < max_outpt) &&
             (bank_writers.at(bank_id).size() < max_inpt)) {
       if (merge_map.count(bank_id)) {
@@ -2192,6 +2227,11 @@ Json create_lake_config(unordered_map<string, MemConnSch> mem_conxs) {
 }
 
 void add_lake_config(Json& jdata, ConfigMap data, int dimensionality, string domain_name) {
+    cout << "IN ADD LAKE CONFIG" << endl;
+    //  std::unordered_map<std::string, st
+    for(auto it: data){
+        cout << it.first << " : " << it.second << tab(1) << domain_name << endl;
+    }
     auto tmp = MemConnSch(dimensionality, data);
     tmp.remove_redundant_dim();
     jdata[domain_name]["dimensionality"] = tmp.dimensionality;
@@ -5235,7 +5275,8 @@ void UBuffer::generate_coreir(CodegenOptions& options,
     }
 
     CoreIR::RecordType* utp = context->Record(ub_field);
-    auto ub = ns->newModuleDecl(buf.name + "_ub", utp);
+    // auto ub = ns->newModuleDecl(buf.name + "_ub", utp);
+    auto ub = ns->newModuleDecl(buf.name + "_ub_mek", utp);
     auto def = ub->newModuleDef();
 
     //TODO: use a more general switch
@@ -5244,7 +5285,6 @@ void UBuffer::generate_coreir(CodegenOptions& options,
     } else {
       buf.generate_coreir_without_ctrl(options, impl, def, hwinfo);
     }
-
     ub->setDef(def);
     return ub;
   }
@@ -12260,15 +12300,13 @@ UBufferImpl generate_optimized_memory_implementation(
     //    return impl;
     cout << "generate_optimized_memory_implementation" << endl;
     cout << "Buffer: " << buf.name << endl;
-    auto isl_ctx_buf = buf.ctx;
-    isl_printer* p = isl_printer_to_file(isl_ctx_buf, stdout);
-    isl_printer_print_union_map(p, buf.global_schedule());
-    cout << endl;
+    cout << buf << endl;
 
     //create ubufferimpl from analysis ubuffer data structure
     cout << "PRE SHIFT REGISTER OPTIMIZATION: " << endl;
     cout << "create shift register for " << buf << endl;
     auto impl = port_group2bank(options, prg, buf, hwinfo);
+    cout << "PRINTING IMPL" << endl << endl;
     cout << impl << endl;
     std::set<string> done_outpt= output_port_sharing(options, prg, buf, hwinfo, impl);
 
@@ -12277,13 +12315,30 @@ UBufferImpl generate_optimized_memory_implementation(
     cout << "Done ports: " << done_outpt << endl;
     cout << "reduced buffer: " << new_buf << endl;
 
-    // After reduction
-    cout << "REDUCED BUFF" << endl;
-      isl_printer_print_union_map(p, new_buf.global_schedule());
+    cout << "PRE REDUCED BUFF: " << buf.name << endl;
+    auto isl_ctx_buf = buf.ctx;
+    isl_printer* p = isl_printer_to_file(isl_ctx_buf, stdout);
+    isl_printer_print_union_map(p, buf.global_schedule());
     cout << endl;
 
-    if (!impl.is_pure_shift_register(new_buf.get_out_ports()))
-        generate_banks_garnet(options, new_buf, impl, hwinfo);
+    // After reduction
+    cout << "REDUCED BUFF" << endl;
+    isl_printer_print_union_map(p, new_buf.global_schedule());
+    cout << endl;
+
+    bool print_extra = false;
+
+    if(buf.name == "hw_input_global_wrapper_stencil"){
+      print_extra = true;
+    }
+
+
+    if (!impl.is_pure_shift_register(new_buf.get_out_ports())){
+      if(print_extra){
+        cout << "Not pure shift register..." << endl;
+      }
+      generate_banks_garnet(options, new_buf, impl, hwinfo);
+    }
 
 
 
@@ -12306,6 +12361,15 @@ void lower_to_garnet_implementation(CodegenOptions& options,
     GarnetImpl CGRAImpl;
     auto bank_id = it.first;
     UBuffer target_buf = buf.generate_ubuffer(options, impl, info, bank_id);
+    auto buf_ctx = target_buf.ctx;
+    isl_printer* p = isl_printer_to_file(buf_ctx, stdout);
+
+    cout << "PRINTING LOWER BUFFER: " << tab(1) << target_buf.name << endl;
+    auto buf_glb_sched_umap = target_buf.global_schedule();
+    // cout << "Schedule: " << buf.second.global_schedule() << endl;
+    isl_printer_print_union_map(p, buf_glb_sched_umap);
+    cout << endl;
+
 
     //This is used for tighten the cyclic banking space
     target_buf.tighten_iteration_domain();

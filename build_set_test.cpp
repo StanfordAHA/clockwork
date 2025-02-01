@@ -21350,6 +21350,9 @@ void compile_for_garnet_single_port_mem(prog& prg,
     cout << "BUFFER SCHED" << endl;
     isl_printer_print_union_map(p, val.global_schedule());
     cout << endl;
+    cout << val << endl;
+    cout << endl;
+    cout << endl;
     // cout << key << "->" << str(val.hardware) << endl;
     // cout << p2 << endl;
     // isl_printer_print_map(p, val);

@@ -2776,6 +2776,7 @@ CoreIR::Module*  generate_coreir_without_ctrl(CodegenOptions& options,
     }
   }
 
+  int buf_cnt = 0;
 
   for (auto& buf : buffers) {
     //Help for DEBUG
@@ -2792,14 +2793,308 @@ CoreIR::Module*  generate_coreir_without_ctrl(CodegenOptions& options,
     if (!prg.is_boundary(buf.first)) {
       //all the memory optimization pass goes here
       cout << "MADE IT HERE" << endl;
+      cout << "Print bank name: " << tab(1) << buf.first << endl;
+      cout << "Print bank schedule..." << endl;
+      auto buf_ctx = buf.second.ctx;
+      isl_printer* p = isl_printer_to_file(buf_ctx, stdout);
+      isl_printer_print_union_map(p, buf.second.global_schedule());
+      cout << endl;
+      cout << "Done printing information..." << endl;
       auto impl = generate_optimized_memory_implementation(options, buf.second, prg, hwinfo);
 
       lower_to_garnet_implementation(options, buf.second, impl, hwinfo);
 
+      cout << "Before bank merging and rewrite: " << buf_cnt << endl;
+
+      cout << "PRINTING IMPLEMENTATION (0)" << endl;
+      cout << impl << endl;
+      cout << endl;
+
+      // cout << impl.get_buf_name() << endl;
+      // Print reads and writers...
+
+      cout << "Writers: " << endl;
+      for (auto w : impl.bank_writers) {
+        cout << tab(1) << w.first << endl;
+        cout << tab(2) << w.second << endl;
+      }
+      cout << "Readers: " << endl;
+      for (auto w : impl.bank_readers) {
+        cout << tab(1) << w.first << endl;
+        cout << tab(2) << w.second << endl;
+      }
+
+      cout << "PRINTING IMPLEMENTATION (1)" << endl;
+      cout << impl << endl;
+      cout << endl;
+
       impl.bank_merging_and_rewrite(options);
+
+      cout << "After bank merging and rewrite: " << buf_cnt << endl;
+
+      cout << "Writers: " << endl;
+      for (auto w : impl.bank_writers) {
+        cout << tab(1) << w.first << endl;
+        cout << tab(2) << w.second << endl;
+      }
+      cout << "Readers: " << endl;
+      for (auto w : impl.bank_readers) {
+        cout << tab(1) << w.first << endl;
+        cout << tab(2) << w.second << endl;
+      }
+
+      buf_cnt++;
+
+      cout << "PRINTING IMPLEMENTATION (2)" << endl;
+      cout << impl << endl;
+      cout << endl;
+
+      cout << "PRINTING GARNET LOWERING" << endl;
+      // Get lowering info from impl...
+      auto lowering_information = impl.lowering_info;
+      for(auto l : lowering_information) {
+        cout << "BANK: " << l.first << " -> " << endl;
+        // Second is a GarnetImpl which ahs a targe_buf
+        auto gimpl = l.second;
+        auto gimpl_targ_buf = gimpl.target_buf;
+        cout << "TARGET BUF: " << endl << gimpl_targ_buf << endl;
+
+        cout << endl << endl << endl;
+
+        // Have target buffer, want to get the different numbers associated with each buffer
+        auto in_ports = gimpl_targ_buf.get_in_ports();
+        auto out_ports = gimpl_targ_buf.get_out_ports();
+
+        std::map<std::string, std::map<std::string, std::vector<int>>> in_ports_collected;
+        std::map<std::string, std::map<std::string, std::vector<int>>> out_ports_collected;
+
+        for (auto inpt : in_ports) {
+
+          // Get access map first.... tyoe std::map<string, umap*>
+          auto buf_access_map = gimpl_targ_buf.access_map.at(inpt);
+          auto buf_sched_map = gimpl_targ_buf.schedule.at(inpt);
+          // Now we want to get the strides for each dimension
+          auto aff_access_map = get_aff(buf_access_map);
+          auto aff_sched_map = get_aff(buf_sched_map);
+          cout << str(aff_access_map) << endl;
+          cout << str(aff_sched_map) << endl;
+          cout << endl;
+
+          auto buff_domain = gimpl_targ_buf.domain.at(inpt);
+
+          auto num_dims_aff = num_dims(buff_domain);
+          cout << "Num dims: " << num_dims_aff << endl;
+
+          // Insert dimensionality
+
+          auto extents_dom = extents(buff_domain);
+
+          in_ports_collected[inpt]["dimensionality"] = {num_dims_aff - 1};
+          in_ports_collected[inpt]["address_stride"] = {};
+          in_ports_collected[inpt]["address_offset"] = {int_const_coeff(aff_access_map)};
+          in_ports_collected[inpt]["cycle_stride"] = {};
+          in_ports_collected[inpt]["cycle_offset"] = {int_const_coeff(aff_sched_map)};
+          in_ports_collected[inpt]["extents"] = {};
+          in_ports_collected[inpt]["deltas"] = {};
+
+          // Now loop through the dims and print the coefficient at each spot...
+          // Ignore the root dimension
+          for(int i = 0; i < num_dims_aff - 1; i++) {
+            cout << "Dim: " << i << endl;
+            int idx = num_dims_aff - 1 - i;
+            cout << "extent: " << extents_dom.at(idx) << endl;
+            cout << "addr stride: " << int_coeff(aff_access_map, idx) << endl;
+            cout << "sched stride: " << int_coeff(aff_sched_map, idx) << endl;
+
+            in_ports_collected[inpt]["address_stride"].push_back(int_coeff(aff_access_map, idx));
+            in_ports_collected[inpt]["cycle_stride"].push_back(int_coeff(aff_sched_map, idx));
+            in_ports_collected[inpt]["extents"].push_back(extents_dom.at(idx));
+
+          }
+          cout << "addr offset: " << int_const_coeff(aff_access_map) << endl;
+          cout << "sched offset: " << int_const_coeff(aff_sched_map) << endl;
+          cout << endl;
+
+        }
+
+
+        for (auto inpt : out_ports) {
+
+          // Get access map first.... tyoe std::map<string, umap*>
+          auto buf_access_map = gimpl_targ_buf.access_map.at(inpt);
+          auto buf_sched_map = gimpl_targ_buf.schedule.at(inpt);
+          // Now we want to get the strides for each dimension
+          auto aff_access_map = get_aff(buf_access_map);
+          auto aff_sched_map = get_aff(buf_sched_map);
+          cout << str(aff_access_map) << endl;
+          cout << str(aff_sched_map) << endl;
+          cout << endl;
+
+          auto buff_domain = gimpl_targ_buf.domain.at(inpt);
+
+          auto num_dims_aff = num_dims(buff_domain);
+          cout << "Num dims: " << num_dims_aff << endl;
+
+          auto extents_dom = extents(buff_domain);
+
+          out_ports_collected[inpt]["dimensionality"] = {num_dims_aff - 1};
+          out_ports_collected[inpt]["address_stride"] = {};
+          out_ports_collected[inpt]["address_offset"] = {int_const_coeff(aff_access_map)};
+          out_ports_collected[inpt]["cycle_stride"] = {};
+          out_ports_collected[inpt]["cycle_offset"] = {int_const_coeff(aff_sched_map)};
+          out_ports_collected[inpt]["extents"] = {};
+          out_ports_collected[inpt]["deltas"] = {};
+
+          // Now loop through the dims and print the coefficient at each spot...
+          for(int i = 0; i < num_dims_aff - 1; i++) {
+            cout << "Dim: " << i << endl;
+            int idx = num_dims_aff - 1 - i;
+            cout << "extent: " << extents_dom.at(idx) << endl;
+            cout << "addr stride: " << int_coeff(aff_access_map, idx) << endl;
+            cout << "sched stride: " << int_coeff(aff_sched_map, idx) << endl;
+
+            out_ports_collected[inpt]["address_stride"].push_back(int_coeff(aff_access_map, idx));
+            out_ports_collected[inpt]["cycle_stride"].push_back(int_coeff(aff_sched_map, idx));
+            out_ports_collected[inpt]["extents"].push_back(extents_dom.at(idx));
+
+          }
+          cout << "addr offset: " << int_const_coeff(aff_access_map) << endl;
+          cout << "sched offset: " << int_const_coeff(aff_sched_map) << endl;
+          cout << endl;
+
+        }
+
+        for(auto inpt: in_ports) {
+          cout << "In port: " << inpt << endl;
+          // Calculate deltas
+          std::vector<int> extents_sub_1;
+          std::vector<int> deltas;
+
+          auto ubuf_map = in_ports_collected.at(inpt);
+
+          auto dims_ = ubuf_map["dimensionality"].at(0);
+          int offset = 0;
+          for(auto it2: ubuf_map["extents"]) {
+            extents_sub_1.push_back(it2 - 1);
+          }
+          deltas.push_back(ubuf_map["address_stride"].at(0));
+          for(int i = 0; i < dims_ - 1; i++) {
+            offset -= (extents_sub_1.at(i) * ubuf_map["address_stride"].at(i));
+            deltas.push_back(ubuf_map["address_stride"].at(i + 1) + offset);
+          }
+          cout << deltas << endl;
+          cout << in_ports_collected.at(inpt)["deltas"] << endl;
+
+          for(auto d: deltas){
+            in_ports_collected.at(inpt)["deltas"].push_back(d);
+          }
+          cout << in_ports_collected.at(inpt)["deltas"] << endl;
+        }
+
+        for(auto it: in_ports_collected) {
+          cout << "In port: " << it.first << endl;
+          for(auto it2: it.second) {
+            cout << tab(1) << it2.first << " -> ";
+            for(auto it3: it2.second) {
+              cout << it3 << " ";
+            }
+            cout << endl;
+          }
+        }
+
+        for(auto inpt: out_ports) {
+          cout << "Out port: " << inpt << endl;
+          // Calculate deltas
+          std::vector<int> extents_sub_1;
+          std::vector<int> deltas;
+
+          auto ubuf_map = out_ports_collected.at(inpt);
+
+          auto dims_ = ubuf_map["dimensionality"].at(0);
+          int offset = 0;
+          for(auto it2: ubuf_map["extents"]) {
+            extents_sub_1.push_back(it2 - 1);
+          }
+          deltas.push_back(ubuf_map["address_stride"].at(0));
+          for(int i = 0; i < dims_ - 1; i++) {
+            offset -= (extents_sub_1.at(i) * ubuf_map["address_stride"].at(i));
+            deltas.push_back(ubuf_map["address_stride"].at(i + 1) + offset);
+          }
+          cout << deltas << endl;
+          cout << out_ports_collected.at(inpt)["deltas"] << endl;
+
+          for(auto d: deltas){
+            out_ports_collected.at(inpt)["deltas"].push_back(d);
+          }
+          cout << out_ports_collected.at(inpt)["deltas"] << endl;
+        }
+
+        for(auto it: out_ports_collected) {
+          cout << "Out port: " << it.first << endl;
+          for(auto it2: it.second) {
+            cout << tab(1) << it2.first << " -> ";
+            for(auto it3: it2.second) {
+              cout << it3 << " ";
+            }
+            cout << endl;
+          }
+        }
+
+        // Calculate Deltas
+
+        // Now we need to implement the dependency algorithm
+        // Store
+        std::map<std::pair<std::string, std::string>, std::map<std::string, std::vector<int>>> rv_deps;
+
+        for(auto in_port: in_ports_collected){
+          for(auto out_port: out_ports_collected){
+
+            auto in_dims = in_port.second["dimensionality"].at(0);
+            auto out_dims = out_port.second["dimensionality"].at(0);
+
+            auto in_address_strides = in_port.second["address_stride"];
+            auto out_address_strides = out_port.second["address_stride"];
+
+            auto in_address_offset = in_port.second["address_offset"].at(0);
+            auto out_address_offset = out_port.second["address_offset"].at(0);
+
+            auto in_extents = in_port.second["extents"];
+            auto out_extents = out_port.second["extents"];
+
+            // Calculate RAW
+            int in_ctr_dim = 0;
+            int out_ctr_dim = 0;
+
+            // Check if the in_port has any deltas less than or equal to 0 to indicate repeated writes
+            bool repeated_write = false;
+            for(auto d: in_port.second["deltas"]){
+              if(d <= 0){
+                repeated_write = true;
+              }
+            }
+
+
+            // At the end, add it to the map
+            rv_deps[std::make_pair(in_port.first, out_port.first)] = {};
+          }
+        }
+
+
+
+      }
+
+      cout << endl << endl << endl;
+
+      cout << "AFTER GARNET LOWERING" << endl;
 
       //Generate the memory module
       auto ub_mod = generate_coreir_without_ctrl(options, context, buf.second, impl, hwinfo);
+      cout << "Printing UB MOD" << endl;
+      cout << ub_mod << endl;
+      cout << ub_mod->toString() << endl;
+      // cout << ub_mod->name << endl;
+      // cout << *ub_mod << endl;
+      // assert(false);
       def->addInstance(buf.second.name, ub_mod);
       //TODO: add reset connection for garnet mapping
       //cout << "connected reset for " << buf.first << buf.second.name <<  endl;
@@ -2829,6 +3124,8 @@ CoreIR::Module*  generate_coreir_without_ctrl(CodegenOptions& options,
     // cout << "Schedule: " << buf.second.global_schedule() << endl;
     isl_printer_print_union_map(p, buf_glb_sched_umap);
     cout << endl;
+    cout << endl;
+    cout << buf << endl << endl;
   }
 
   cout << "AFTER BUFFER OPT" << endl;
@@ -2979,6 +3276,9 @@ CoreIR::Module*  generate_coreir_without_ctrl(CodegenOptions& options,
     // cout << "Schedule: " << buf.second.global_schedule() << endl;
     isl_printer_print_union_map(p, buf_glb_sched_umap);
     cout << endl;
+    cout << endl;
+    cout << endl;
+    cout << buf << endl << endl;
   }
 
   generate_controller_for_compute_share(options, def, sched_maps, hwinfo, prg);
@@ -2994,6 +3294,9 @@ CoreIR::Module*  generate_coreir_without_ctrl(CodegenOptions& options,
     // cout << "Schedule: " << buf.second.global_schedule() << endl;
     isl_printer_print_union_map(p, buf_glb_sched_umap);
     cout << endl;
+    cout << endl;
+    cout << endl;
+    cout << buf << endl << endl;
   }
 
   ub->setDef(def);

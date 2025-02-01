@@ -624,6 +624,7 @@ CoreIR::Namespace* CoreIRLoadLibrary_cgralib(Context* c) {
             bool has_read_valid = genargs.at("has_read_valid")->get<bool>();
             for (size_t i = 0; i < num_output; i ++) {
                 recordparams.push_back({"data_out_" + std::to_string(i),
+                // recordparams.push_back({"mek_data_out_" + std::to_string(i),
                         c->Bit()->Arr(width)});
 
                 if (has_read_valid) {
