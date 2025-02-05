@@ -1299,6 +1299,12 @@ map<string, UBuffer> build_buffers(prog& prg, umap* opt_sched, schedule_info & h
   vector<op*> all_op_vec(all_op.begin(), all_op.end());
   std::sort(all_op_vec.begin(), all_op_vec.end(), [](op* l, op* r){return l->name > r->name;});
 
+  auto vd = prg.validity_deps();
+  cout << "Printing validity deps..." << endl;
+  cout << str(vd) << endl;
+
+  cout << "BUILD BUFFERS ALL OP VEC" << endl;
+
   for (auto op : all_op_vec) {
 
     for (auto consumed : op->produce_locs) {
@@ -1320,6 +1326,10 @@ map<string, UBuffer> build_buffers(prog& prg, umap* opt_sched, schedule_info & h
       string pt_name = name + "_" + op->name + "_" + to_string(usuffix);
       buf.port_bundles[op->name + "_write"].push_back(pt_name);
 
+      cout << "(1) Creating name out of " << name << " and " << op->name << " and " << usuffix << endl;
+      cout << "Printing validity deps..." << endl;
+      cout << str(vd) << endl;
+
       string cond = "{ ";
       for (auto sec_pair : consumed.second) {
         if (sec_pair.first == "") {
@@ -1329,6 +1339,8 @@ map<string, UBuffer> build_buffers(prog& prg, umap* opt_sched, schedule_info & h
           cond = cond + string(prg.op_iter(op) + " -> " + consumed.first + "[" + sec_pair.second + "] : " + sec_pair.first + "; ");
         }
       }
+
+      // cout << "Cond: " << cond << endl;
       cond = cond.substr(0, cond.length() - 2);
       cond = cond + string(" }");
 
@@ -1380,6 +1392,10 @@ map<string, UBuffer> build_buffers(prog& prg, umap* opt_sched, schedule_info & h
 
       UBuffer& buf = buffers.at(name);
 
+      cout << "(2) Creating name out of " << name << " and " << op->name << " and " << usuffix << endl;
+      cout << "Printing validity deps..." << endl;
+      cout << str(vd) << endl;
+
       string pt_name = name + "_" + op->name + "_" + to_string(usuffix);
       buf.port_bundles[op->name + "_read"].push_back(pt_name);
 
@@ -1392,6 +1408,7 @@ map<string, UBuffer> build_buffers(prog& prg, umap* opt_sched, schedule_info & h
           cond = cond + string(prg.op_iter(op) + " -> " + consumed.first + "[" + sec_pair.second + "] : " + sec_pair.first + "; ");
         }
       }
+      // cout << "Cond2: " << cond << endl;
       cond = cond.substr(0, cond.length() - 2);
       cond = cond + string(" }");
 
