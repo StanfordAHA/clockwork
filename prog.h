@@ -1414,6 +1414,7 @@ struct prog {
   }
 
   umap* validity_deps();
+  umap* validity_deps_WAR();
 
   isl_union_set* whole_iteration_domain() {
     map<op*, isl_set*> doms = domains();

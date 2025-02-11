@@ -2804,6 +2804,7 @@ CoreIR::Module*  generate_coreir_without_ctrl(CodegenOptions& options,
 
       lower_to_garnet_implementation(options, buf.second, impl, hwinfo);
 
+
       cout << "Before bank merging and rewrite: " << buf_cnt << endl;
 
       cout << "PRINTING IMPLEMENTATION (0)" << endl;
@@ -2852,6 +2853,137 @@ CoreIR::Module*  generate_coreir_without_ctrl(CodegenOptions& options,
       cout << "PRINTING GARNET LOWERING" << endl;
       // Get lowering info from impl...
       auto lowering_information = impl.lowering_info;
+      // TODO: Check here if the lowered information has infomation on the changed buffer
+      cout << "GETTING INFO FOR FILTERING: " << buf.first << endl;
+
+      std::vector<std::string> normal_ports;
+      std::vector<std::string> siphoned_from_input_port_ports;
+      std::vector<std::pair<string, string>> siphoned_from_normal_port_ports;
+
+      // Go through the shift registered outputs and match them
+      for(auto sro : impl.shift_registered_outputs){
+        // These are the ones that are directly siphoned off the input
+        cout << "Shift reg output: " << sro.first << endl;
+        cout << "The actual output and its int..." << sro.second.first << " " << sro.second.second << endl;
+        cout << endl << endl << endl;
+
+        auto port_name = sro.first;
+        auto writer_name = sro.second.first;
+        // Now we have the port name - find it in the original buf and print its information
+        // Get domain and access map
+        auto buf_access_map = buf.second.access_map.at(port_name);
+        auto buf_domain = buf.second.domain.at(port_name);
+        auto buf_sched = buf.second.schedule.at(port_name);
+
+        cout << "Domain: " << str(buf_domain) << endl;
+        cout << "Access Map: " << str(buf_access_map) << endl;
+        cout << "Schedule: " << str(buf_sched) << endl;
+
+        for(auto l : lowering_information) {
+          cout << "IMPL: " << l.first << " -> " << endl;
+          // Second is a GarnetImpl which ahs a targe_buf
+          auto gimpl = l.second;
+          auto gimpl_targ_buf = gimpl.target_buf;
+          // cout << "TARGET BUF: " << endl << gimpl_targ_buf << endl;
+          bool exists_in_impl = gimpl_targ_buf.access_map.count(port_name) > 0;
+          cout << "Exists in impl: " << exists_in_impl << endl;
+
+          if(exists_in_impl){
+            auto new_domain = gimpl_targ_buf.domain.at(port_name);
+            auto new_access_map = gimpl_targ_buf.access_map.at(port_name);
+            auto new_schedule = gimpl_targ_buf.schedule.at(port_name);
+
+            cout << "Domain: " << str(new_domain) << endl;
+            cout << "Access Map: " << str(new_access_map) << endl;
+            cout << "Schedule: " << str(new_schedule) << endl;
+            normal_ports.push_back(port_name);
+            // Now want to calculate the difference
+          }
+          else{
+            siphoned_from_input_port_ports.push_back(port_name);
+            cout << "Does not exist in impl: directly siphoned off of input (in shift_registered_outputs)" << endl;
+            cout << "Providing it the original domain and access map..." << endl;
+            auto new_domain = buf.second.domain.at(writer_name);
+            auto new_access_map = buf.second.access_map.at(writer_name);
+            auto new_schedule = buf.second.schedule.at(writer_name);
+            cout << "Domain: " << str(new_domain) << endl;
+            cout << "Access Map: " << str(new_access_map) << endl;
+            cout << "Schedule: " << str(new_schedule) << endl;
+            // Now want to calculate the difference
+          }
+
+        }
+      }
+
+      for(auto sro : impl.shift_registered_outputs_to_outputs){
+        // These are the ones that are directly siphoned off the input
+        cout << "Shift reg output to output: " << sro.first << endl;
+        cout << "The actual output and its int..." << sro.second.first << " " << sro.second.second << endl;
+        cout << endl << endl << endl;
+
+        auto port_name = sro.first;
+        auto writer_name = sro.second.first;
+        // Now we have the port name - find it in the original buf and print its information
+        // Get domain and access map
+        auto buf_access_map = buf.second.access_map.at(port_name);
+        auto buf_domain = buf.second.domain.at(port_name);
+        auto buf_sched = buf.second.schedule.at(port_name);
+
+        cout << "Domain: " << str(buf_domain) << endl;
+        cout << "Access Map: " << str(buf_access_map) << endl;
+        cout << "Schedule: " << str(buf_sched) << endl;
+
+        for(auto l : lowering_information) {
+          cout << "IMPL: " << l.first << " -> " << endl;
+          // Second is a GarnetImpl which ahs a targe_buf
+          auto gimpl = l.second;
+          auto gimpl_targ_buf = gimpl.target_buf;
+          // cout << "TARGET BUF: " << endl << gimpl_targ_buf << endl;
+          bool exists_in_impl = gimpl_targ_buf.access_map.count(port_name) > 0;
+          cout << "Exists in impl: " << exists_in_impl << endl;
+
+          if(exists_in_impl){
+            auto new_domain = gimpl_targ_buf.domain.at(port_name);
+            auto new_access_map = gimpl_targ_buf.access_map.at(port_name);
+            auto new_schedule = gimpl_targ_buf.schedule.at(port_name);
+
+            cout << "Domain: " << str(new_domain) << endl;
+            cout << "Access Map: " << str(new_access_map) << endl;
+            cout << "Schedule: " << str(new_schedule) << endl;
+
+            // Now want to calculate the difference
+          }
+          else{
+            cout << "Does not exist in impl: directly siphoned off of input (in shift_registered_outputs)" << endl;
+            cout << "Providing it the original domain and access map..." << endl;
+            auto new_domain = buf.second.domain.at(writer_name);
+            auto new_access_map = buf.second.access_map.at(writer_name);
+            auto new_schedule = buf.second.schedule.at(writer_name);
+            cout << "Domain: " << str(new_domain) << endl;
+            cout << "Access Map: " << str(new_access_map) << endl;
+            cout << "Schedule: " << str(new_schedule) << endl;
+            // Now want to calculate the difference
+          }
+
+        }
+      }
+
+      if((buf.first == "hw_input_global_wrapper_stencil") || (buf.first == "hw_input_global_wrapper_stencil_bank_2")){
+        cout << "Dying early for information" << endl;
+        cout << "Normal Ports" << endl << normal_ports << endl;
+        cout << "Siphoned from input port ports" << endl << siphoned_from_input_port_ports << endl;
+        cout << "Siphoned from normal port ports" << endl << siphoned_from_normal_port_ports << endl;
+        assert(false);
+      }
+      // assert(false);
+
+      cout << "Printing bank capacity..." << endl;
+      for (auto it : impl.bank_readers) {
+        auto bank_num = it.first;
+        auto bank_capacity = impl.get_bank_capacity(bank_num);
+        cout << "BANK: " << bank_num << " -> " << bank_capacity << endl;
+      }
+
       for(auto l : lowering_information) {
         cout << "BANK: " << l.first << " -> " << endl;
         // Second is a GarnetImpl which ahs a targe_buf

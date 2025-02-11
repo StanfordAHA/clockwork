@@ -1300,8 +1300,11 @@ map<string, UBuffer> build_buffers(prog& prg, umap* opt_sched, schedule_info & h
   std::sort(all_op_vec.begin(), all_op_vec.end(), [](op* l, op* r){return l->name > r->name;});
 
   auto vd = prg.validity_deps();
+  auto vd_war = prg.validity_deps_WAR();
   cout << "Printing validity deps..." << endl;
   cout << str(vd) << endl;
+  cout << "Printing validity deps WAR..." << endl;
+  cout << str(vd_war) << endl;
 
   cout << "BUILD BUFFERS ALL OP VEC" << endl;
 
@@ -1328,7 +1331,9 @@ map<string, UBuffer> build_buffers(prog& prg, umap* opt_sched, schedule_info & h
 
       cout << "(1) Creating name out of " << name << " and " << op->name << " and " << usuffix << endl;
       cout << "Printing validity deps..." << endl;
-      cout << str(vd) << endl;
+      string vd_str = str(vd);
+      std::replace(vd_str.begin(), vd_str.end(), ';', '\n');
+      cout << vd_str << endl;
 
       string cond = "{ ";
       for (auto sec_pair : consumed.second) {
@@ -1394,10 +1399,33 @@ map<string, UBuffer> build_buffers(prog& prg, umap* opt_sched, schedule_info & h
 
       cout << "(2) Creating name out of " << name << " and " << op->name << " and " << usuffix << endl;
       cout << "Printing validity deps..." << endl;
-      cout << str(vd) << endl;
+      string vd_str = str(vd);
+      std::replace(vd_str.begin(), vd_str.end(), ';', '\n');
+      string vd_war_str = str(vd_war);
+      std::replace(vd_war_str.begin(), vd_war_str.end(), ';', '\n');
+      cout << vd_str << endl;
+      cout << endl << endl << endl;
+      cout << "Printing validity deps WAR..." << endl;
+      cout << vd_war_str << endl;
+      // We have the validity deps here...
+      // We need to find the validity deps for the current op
+      cout << "Printing OP" << endl;
+      cout << op << endl;
+
+      auto buffer_name = name;
+      auto op_name = op->name;
+
+      // Have the buffer and the op. Need to take the specific part of the op (consumed location)
+      // and find the validity deps for that statement
+      cout << "buffer name: " << buffer_name << endl;
+      cout << "op name: " << op_name << endl;
+      cout << "Consumed first: " << consumed.first << endl;
+      cout << "Consumed second: " << consumed.second << endl;
 
       string pt_name = name + "_" + op->name + "_" + to_string(usuffix);
       buf.port_bundles[op->name + "_read"].push_back(pt_name);
+
+
 
       string cond = "{ ";
       for (auto sec_pair : consumed.second) {

@@ -11564,11 +11564,22 @@ bool pad_range_one_vec_dim(map<int, int> & dim2denom,
         auto in_sched = buf.schedule.at(inpt);
         auto out_sched = buf.schedule.at(outpt);
 
+        cout << "Input Port: " << inpt << endl;
+        cout << "Output Port: " << outpt << endl;
+
+        cout << "In sched: " << str(in_sched) << endl;
+        cout << "Out sched: " << str(out_sched) << endl;
+
+        cout << "inv in sched: " << str(inv(in_sched)) << endl;
+        cout << "inv out sched: " << str(inv(out_sched)) << endl;
+
         auto time_to_write = dot(inv(in_sched), (writes));
         auto time_to_read = dot(inv(out_sched), (reads));
 
         cout << "Time to write: " << str(time_to_write) << endl;
         cout << "Time to read : " << str(time_to_read) << endl;
+
+        cout << "Inv time to read: " << str(inv(time_to_read)) << endl;
 
         auto pc_times = dot(time_to_write, inv(time_to_read));
         cout << "PC times     : " << str(pc_times) << endl;
@@ -12104,11 +12115,14 @@ map<string, vector<pair<string, int> > > determine_shift_reg_map_new(
             dependence_distance_singleton(buf, inpt, outpt, sc);
           if (dd.has_value()) {
             int dd_raw = dd.get_value();
+            cout << "MEK DD: " << dd_raw << endl;
             dd_raw -= hwinfo.compute_latency(write_op);
+            cout << "MEK DD AFTER: " << dd_raw << endl;
             if (write_op->buffers_read().size() > 0) {
               dd_raw -= hwinfo.load_latency(pick(write_op->buffers_read()));
             }
             dd_raw += hwinfo.load_latency(buf.name);
+            cout << "MEK DD AFTER 2: " << dd_raw << endl;
 
             if (!(dd_raw >= 0)) {
               cout << "Error: Negative dependence distance: " << dd_raw << endl;
@@ -12131,6 +12145,7 @@ dgraph build_in_to_out_shift_register_graph(CodegenOptions& options, prog& prg, 
   dgraph dg;
   bool fanin_node = false;
   for (auto pt : shift_registered_outputs) {
+
     string outpt = pt.first;
     if (pt.second.size() > 1) {
         //handle this case specially
@@ -12148,6 +12163,7 @@ dgraph build_in_to_out_shift_register_graph(CodegenOptions& options, prog& prg, 
       }
 
     }
+
   }
 
   cout << "DG: ..." << endl;
@@ -12340,12 +12356,11 @@ UBufferImpl generate_optimized_memory_implementation(
       generate_banks_garnet(options, new_buf, impl, hwinfo);
     }
 
-
-
     cout << "After banking optimization: " << impl << endl;
     //impl.bank_merging(options);
     impl.sort_bank_port();
     cout << "After bank merging: " << impl << endl;
+
     return impl;
 }
 
