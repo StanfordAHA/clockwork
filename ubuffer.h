@@ -1081,6 +1081,7 @@ class UBuffer {
     bool contain_memory_tile = false;
 
     std::map<string, umap*> access_map;
+    std::map<string, umap*> access_map_non_simplified;
     std::map<string, isl_union_map*> schedule;
     std::map<string, vector<string> > port_bundles;
 

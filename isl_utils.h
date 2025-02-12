@@ -361,7 +361,6 @@ std::string name(isl_set* const m);
 void print(struct isl_ctx* const ctx, isl_map* const m);
 
 isl_union_map* inv(isl_union_map* const m0);
-isl_union_map* inv_in_place(isl_union_map* const m0);
 
 isl_set* lexmin(isl_set* const m0);
 

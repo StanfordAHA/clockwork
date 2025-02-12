@@ -1601,11 +1601,6 @@ isl_union_map* inv(isl_union_map* const m0) {
   return isl_union_map_reverse(cpy(m0));
 }
 
-// In place option...
-isl_union_map* inv_in_place(isl_union_map* const m0) {
-  return isl_union_map_reverse_ip(cpy(m0));
-}
-
 isl_set* lexmin(isl_set* const m0) {
   return isl_set_lexmin(cpy(m0));
 }

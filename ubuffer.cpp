@@ -886,10 +886,10 @@ map<string, UBuffer> UBuffer::generate_ubuffer(CodegenOptions& options) {
     buf.ctx = ctx;
     buf.port_widths = port_widths;
     buf.coarse_grained_pipeline_loop_level = coarse_grained_pipeline_loop_level;
-    cout << "CGPL level :" << coarse_grained_pipeline_loop_level;
+    cout << "CGPL level : " << coarse_grained_pipeline_loop_level << endl;
     auto inpts = get_bank_inputs(b.name);
     auto outpts = get_bank_unique_outputs(b.name);
-
+    cout << "MEK HERE 789" << endl;
     //add a sort of output make sure we have positive stride when coalesce
     vector<string> pt_vec(outpts.begin(), outpts.end());
     sort(pt_vec.begin(), pt_vec.end(), [this](const string l, const string r) {
@@ -897,7 +897,7 @@ map<string, UBuffer> UBuffer::generate_ubuffer(CodegenOptions& options) {
               auto r_start = lexminpt(range(access_map.at(r)));
               return lex_lt_pt(l_start, r_start);
               });
-
+    cout << "MEK HERE 456" << endl;
     int usuffix = 0;
 
     //FIXME: this is a hack to identify shift register optimization
@@ -925,12 +925,14 @@ map<string, UBuffer> UBuffer::generate_ubuffer(CodegenOptions& options) {
     //Check if we could merge them into same bundle
     for (auto outpt: pt_vec) {
       auto acc_map = to_map(access_map.at(outpt));
+      cout << "EARLY ACC MAP: " << str(acc_map) << endl;
       if (banking.partition == "cyclic") {
         cout << "\tread domain: " << str(b.rddom) << endl;
         cout << "\tread map: " << str(acc_map) << endl;
         acc_map = coalesce(its_range(acc_map, to_set(b.rddom)));
       }
       acc_map = set_range_name(acc_map, bname);
+      cout << "FINAL ACC MAP: " << str(acc_map) << endl;
       auto dom = ::domain(acc_map);
       string pt_name = bname + "_" + ::name(dom) + "_" + to_string(usuffix);
       //string pt_name = outpt;
@@ -947,6 +949,8 @@ map<string, UBuffer> UBuffer::generate_ubuffer(CodegenOptions& options) {
     cout << "\t\tTotal capacity: " << buf.capacity() << endl;
     buffers[bname] = buf;
   }
+
+  cout << "MEK HERE 123" << endl;
   return buffers;
 }
 
@@ -1199,12 +1203,12 @@ void UBufferImpl::merge_banks_and_rewrite(vector<int> & banks_tobe_merged, bool 
 
   isl_ctx* buf_ctx = nullptr;
 
+  cout << "PRINTING MERGE AND REWRITE TARGET BUFFER" << endl;
   for(auto it: target_buffers) {
-    cout << "PRINTING MERGE AND REWRITE TARGET BUFFER" << endl;
-    buf_ctx = it.ctx;
-    isl_printer* p = isl_printer_to_file(buf_ctx, stdout);
-    isl_printer_print_union_map(p, it.global_schedule());
-    cout << endl;
+    cout << it << endl;
+    for(auto it2 : it.access_map_non_simplified) {
+      cout << it2.first << " : " << str(it2.second) << endl;
+    }
   }
 
   //TODO check the other impl are the same
@@ -1242,15 +1246,19 @@ void UBufferImpl::merge_banks_and_rewrite(vector<int> & banks_tobe_merged, bool 
   //Also merge target buffer
   merged_impl.target_buf = merge_buf_with_different_outpt(target_buffers, new_sram_name);
 
+  // Copy over from target buffers
+  for(auto tb : target_buffers){
+    for(auto it : tb.access_map_non_simplified) {
+      cout << it.first << " : " << str(it.second) << endl;
+      merged_impl.target_buf.access_map_non_simplified.insert(it);
+    }
+  }
+
   cout << "TARGET BUFFER AFTER MERGE" << endl;
-  // auto buf_ctx = merged_impl.target_buf.ctx;
-  isl_printer* p = isl_printer_to_file(buf_ctx, stdout);
-  cout << "Try printing merged glob sched..." << endl;
-  // cout << merged_impl.target_buf.global_schedule() << endl;
-  // cout << str(merged_impl) << endl;
-  cout << endl;
-  // isl_printer_print_union_map(p, merged_impl.target_buf.global_schedule());
-  // cout << endl;
+  cout << merged_impl.target_buf << endl;
+  for(auto it : merged_impl.target_buf.access_map_non_simplified) {
+    cout << it.first << " : " << endl << str(it.second) << endl;
+  }
 
   merged_impl.sub_component.insert({new_sram_name, sram_merged});
   auto stmt2sched = sram_merged.get_stmt2sched();
@@ -1677,8 +1685,9 @@ UBuffer UBuffer::generate_ubuffer(CodegenOptions& options, UBufferImpl& impl, sc
     buf.ctx = ctx;
     buf.port_widths = port_widths;
     buf.coarse_grained_pipeline_loop_level = coarse_grained_pipeline_loop_level;
-    cout << "CGPL level :" << coarse_grained_pipeline_loop_level << endl;
-
+    cout << "CGPL level : " << coarse_grained_pipeline_loop_level << endl;
+    cout << impl << endl;
+    cout << "MEK HERE 123" << endl;
     auto inpts = impl.get_unique_inpts(bank);
     auto outpts = impl.get_unique_outpts(bank);
     cout <<"impl inputs: "<< inpts << endl;
@@ -1699,7 +1708,7 @@ UBuffer UBuffer::generate_ubuffer(CodegenOptions& options, UBufferImpl& impl, sc
     int op_latency = 0;
     //FIXME: this is a hack for broadcast latency
     int broadcast_latency = info.get_ub_latency(name, bank);
-
+    cout << "MEK HERE 456" << endl;
 
     for (string inpt: inpts) {
       auto acc_map = to_map(access_map.at(inpt));
@@ -1751,8 +1760,14 @@ UBuffer UBuffer::generate_ubuffer(CodegenOptions& options, UBufferImpl& impl, sc
 
     for (string outpt: outpts) {
       auto acc_map = to_map(access_map.at(outpt));
+      cout << "ORIGINAL ACCESS MAP" << endl;
+      cout << str(acc_map) << endl;
       //get the bank specific access map
+
+
       acc_map = simplify(coalesce(its_range(acc_map, rddom)));
+      cout << "SIMPLIFIED ACCESS MAP" << endl;
+      cout << str(acc_map) << endl;
       auto sched = schedule.at(outpt);
 
       acc_map = set_range_name(acc_map, bname);
@@ -1766,6 +1781,8 @@ UBuffer UBuffer::generate_ubuffer(CodegenOptions& options, UBufferImpl& impl, sc
       }*/
       //string pt_name = bname + "_" + ::name(dom) + "_" + to_string(usuffix);
 
+      cout << "MEK HERE BEFORE IS SHIFT REG" << endl;
+
       if (impl.is_shift_register_output(outpt)) {
         cout << impl << endl;
         int delay = impl.shift_registered_outputs.at(outpt).second;;
@@ -1774,10 +1791,22 @@ UBuffer UBuffer::generate_ubuffer(CodegenOptions& options, UBufferImpl& impl, sc
         auto acc_map = to_map(access_map.at(inpt));
         //get the bank specific access map
         acc_map = coalesce(its_range(acc_map, rddom));
+
+        cout << "ACCESS MAP AFTER COALESCE" << endl;
+        cout << str(acc_map) << endl;
+
+
         auto sched = to_map(schedule.at(inpt));
 
         acc_map = set_range_name(acc_map, bname);
+        cout << "ACCESS MAP AFTER RANGE NAME" << endl;
+        cout << str(acc_map) << endl;
+
         acc_map = add_domain_suffix(acc_map, domain_name(acc_map) + "_delay_"+str(delay));
+
+        cout << "ACCESS MAP AFTER DOMAIN NAME CHANGE" << endl;
+        cout << str(acc_map) << endl;
+
         sched = add_domain_suffix(sched, domain_name(sched) + "_delay_"+str(delay));
 
         auto dom = ::domain(acc_map);
@@ -1809,8 +1838,33 @@ UBuffer UBuffer::generate_ubuffer(CodegenOptions& options, UBufferImpl& impl, sc
       }
       usuffix ++;
     }
+
+    cout << "BEFORE FINAL BUF PRINT" << endl;
+
     cout << buf << endl;
-  buf.simplify_address_space();
+    buf.simplify_address_space();
+    cout << "AFTER SIMPLIFY" << endl;
+    cout << buf << endl;
+    // Put it in non simplified
+    for (string inpt: inpts) {
+      cout << "Inpt: " << inpt << endl;
+      auto acc_map = buf.access_map.at(inpt);
+      buf.access_map_non_simplified.insert({inpt, cpy(acc_map)});
+    }
+    for (string outpt: outpts) {
+      cout << "Output: " << outpt << endl;
+      auto acc_map = buf.access_map.at(outpt);
+      buf.access_map_non_simplified.insert({outpt, cpy(acc_map)});
+    }
+
+    cout << "COPIED" << endl;
+    cout << "Printing non-simplified..." << endl;
+    for(auto it: buf.access_map_non_simplified){
+      cout << it.first << endl;
+      cout << str(it.second) << endl;
+    }
+
+    // This may be last time the buf has non-flattened addresses.
   if (sr) {
       cout << "SR optimization row buf before tighten:" << buf << endl;
       buf.tighten_address_space();
@@ -1819,6 +1873,7 @@ UBuffer UBuffer::generate_ubuffer(CodegenOptions& options, UBufferImpl& impl, sc
       //FIXME: should do this after figure out vectorization dimension
       //Maybe it's correct ???
       //ASPLOS: this need to be tested for high throughput
+    // MEK: This is the last time
     buf.linear_address_space(project_out_zero_dim(to_set(buf.global_range())), options.mem_hierarchy.at("mem").fetch_width);
     //buf.linear_address_space(project_out_zero_dim(rddom),
     //        max(4/*fetch_width*/, stride_in_dim(rddom, ::num_dims(rddom) - 1)));
@@ -12376,13 +12431,14 @@ void lower_to_garnet_implementation(CodegenOptions& options,
     GarnetImpl CGRAImpl;
     auto bank_id = it.first;
     UBuffer target_buf = buf.generate_ubuffer(options, impl, info, bank_id);
-    auto buf_ctx = target_buf.ctx;
-    isl_printer* p = isl_printer_to_file(buf_ctx, stdout);
+    // auto buf_ctx = target_buf.ctx;
+    // isl_printer* p = isl_printer_to_file(buf_ctx, stdout);
 
     cout << "PRINTING LOWER BUFFER: " << tab(1) << target_buf.name << endl;
-    auto buf_glb_sched_umap = target_buf.global_schedule();
+    cout << target_buf << endl;
+    // auto buf_glb_sched_umap = target_buf.global_schedule();
     // cout << "Schedule: " << buf.second.global_schedule() << endl;
-    isl_printer_print_union_map(p, buf_glb_sched_umap);
+    // isl_printer_print_union_map(p, buf_glb_sched_umap);
     cout << endl;
 
 
@@ -12412,9 +12468,19 @@ void lower_to_garnet_implementation(CodegenOptions& options,
     //Fisrt create the shift register
     create_accumulation_register_and_rewrite_buf(options, target_buf, CGRAImpl);
 
+    cout << "BUFFER NAME: " << target_buf.name << endl;
+
+    cout << "BEFORE REMOVE REDUNDANT DIM" << endl;
+    cout << target_buf << endl;
+
     target_buf.remove_redundant_dim();
+
+    cout << "BEFORE SIMPLIFY FLOOR" << endl;
+    cout << target_buf << endl;
     //Generate the ubuffer module for CGRA
     target_buf.simplify_floor_div_expr();
+    cout << "AFTER SIMPLIFY FLOOR" << endl;
+    cout << target_buf << endl;
 
     if (CGRAImpl.config_mode == "lake") {
       map<string, UBuffer> vectorized_buf;
