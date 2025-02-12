@@ -2860,12 +2860,15 @@ CoreIR::Module*  generate_coreir_without_ctrl(CodegenOptions& options,
       std::vector<std::string> siphoned_from_input_port_ports;
       std::vector<std::pair<string, string>> siphoned_from_normal_port_ports;
 
+      // Need to save the domain, access map that is used for the buffer
+      std::map<std::string, isl_set*> use_domains_save;
+      std::map<std::string, umap*> use_access_maps_save;
+
       // Go through the shift registered outputs and match them
       for(auto sro : impl.shift_registered_outputs){
         // These are the ones that are directly siphoned off the input
         cout << "Shift reg output: " << sro.first << endl;
         cout << "The actual output and its int..." << sro.second.first << " " << sro.second.second << endl;
-        cout << endl << endl << endl;
 
         auto port_name = sro.first;
         auto writer_name = sro.second.first;
@@ -2873,51 +2876,30 @@ CoreIR::Module*  generate_coreir_without_ctrl(CodegenOptions& options,
         // Get domain and access map
         auto buf_access_map = buf.second.access_map.at(port_name);
         auto buf_domain = buf.second.domain.at(port_name);
-        auto buf_sched = buf.second.schedule.at(port_name);
-
         cout << "Domain: " << str(buf_domain) << endl;
         cout << "Access Map: " << str(buf_access_map) << endl;
-        cout << "Schedule: " << str(buf_sched) << endl;
 
         for(auto l : lowering_information) {
           cout << "IMPL: " << l.first << " -> " << endl;
           // Second is a GarnetImpl which ahs a targe_buf
           auto gimpl = l.second;
           auto gimpl_targ_buf = gimpl.target_buf;
-          // cout << "TARGET BUF: " << endl << gimpl_targ_buf << endl;
           bool exists_in_impl = gimpl_targ_buf.access_map.count(port_name) > 0;
-          cout << "Exists in impl: " << exists_in_impl << endl;
+          // cout << "Exists in impl: " << exists_in_impl << endl;
 
           if(exists_in_impl){
             auto new_domain = gimpl_targ_buf.domain.at(port_name);
-            cout << "Domain: " << str(new_domain) << endl;
-            // auto new_access_map = gimpl_targ_buf.access_map.at(port_name);
             // Get non-simplified...
-            for(auto it: gimpl_targ_buf.access_map_non_simplified){
-              cout << "Access Map NON Simplified: " << it.first << " -> " << str(it.second) << endl;
-            }
-            // cout << "Access Map NON Simplified: " << str(gimpl_targ_buf.access_map_non_simplified) << endl;
             auto new_access_map = gimpl_targ_buf.access_map_non_simplified.at(port_name);
+            cout << "Domain: " << str(new_domain) << endl;
             cout << "Access Map: " << str(new_access_map) << endl;
-            auto new_schedule = gimpl_targ_buf.schedule.at(port_name);
 
-            // cout << "Schedule: " << str(new_schedule) << endl;
             normal_ports.push_back(port_name);
+
             // Now want to calculate the difference
-
-            // cout << "Bank rddom: " << str(impl.bank_rddom.at(l.first)) << endl;
-            // cout << "Abstract buffer name: " << buf.second.name << endl;
-            // cout << "Target buffer name: " << gimpl_targ_buf.name << endl;
-            // cout << "Original abstract using function: " << buf.second.get_ub_inst_name(l.first) << endl;
-            // cout << "Original abstract using function2: " << buf.second.get_ub_inst_name(l.first).erase(0, 3) << endl;
-
             // Copy access map and rename range to original buffer...
-            // cout << "Convert union map to map???" << endl;
             auto copied_access_map = cpy(new_access_map);
-            // cout << "COPIED ACCESS MAP: " << str(copied_access_map) << endl;
-            // cout << "NUMBER REFS TO MAP: " << str(copied_access_map->ref) << endl;
             auto converted_from_union_map_to_map = to_map(copied_access_map);
-            // cout << "Check map is not null: " << (converted_from_union_map_to_map != nullptr) << endl;
             if(converted_from_union_map_to_map == nullptr){
               cout << "Converted map is null" << endl;
               assert(false);
@@ -2925,91 +2907,66 @@ CoreIR::Module*  generate_coreir_without_ctrl(CodegenOptions& options,
             auto renamed_access_map = set_range_name(converted_from_union_map_to_map, buf.second.name);
 
             auto convert_back_into_union_map = to_umap(renamed_access_map);
-            // cout << "Check map is not null: " << (convert_back_into_union_map != nullptr) << endl;
             if(convert_back_into_union_map == nullptr){
               cout << "re-Converted map is null" << endl;
               assert(false);
             }
-            // cout << "Renamed access map: " << str(convert_back_into_union_map) << endl;
 
             // Try projecting the range of the original on the range of the new
-            // auto inv_original_access_map = inv_in_place(buf_access_map);
             auto inv_original_access_map = inv(buf_access_map);
-            auto inv_new_access_map = inv(convert_back_into_union_map);
-            // auto inv_new_access_map = inv_in_place(convert_back_into_union_map);
-            // cout << "Renamed access map after in place: " << str(convert_back_into_union_map) << endl;
-            // cout << "Original inv access map : " << str(inv(buf_access_map)) << endl;
-            // cout << "New inv access map: " << str(inv(new_access_map)) << endl;
-            // cout << "New inv access map (renamed): " << str(inv_new_access_map) << endl;
             auto old_proj_onto_new = dot(convert_back_into_union_map, inv_original_access_map);
-            auto old_proj_onto_new2 = dot(buf_access_map, inv_new_access_map);
             cout << "Old projected onto new: " << str(old_proj_onto_new) << endl;
-            // cout << "New Proj onto old: " << str(old_proj_onto_new2) << endl;
 
             // Get difference in domain between
             auto domain_new = to_uset(cpy(new_domain));
             auto domain_projected = domain(old_proj_onto_new);
-
-            cout << "Domain new: " << str(domain_new) << endl;
-            cout << "Domain projected: " << str(domain_projected) << endl;
-
             // Calculate difference
             auto diff_domains = diff(domain_new, domain_projected);
 
+            cout << "Domain new: " << str(domain_new) << endl;
+            cout << "Domain projected: " << str(domain_projected) << endl;
             cout << "Difference in domains: " << str(diff_domains) << endl;
-            // // Try using subtraction method...
-            // auto uset_new_domain = to_uset(new_domain);
-            // auto uset_buf_domain = to_uset(buf_domain);
 
-            // auto diff_access_maps = diff(buf_access_map, convert_back_into_union_map);
-            // cout << "Difference in access maps (original - new): " << str(diff_access_maps) << endl;
+            // Save information for later...
+            use_domains_save.insert({port_name, cpy(new_domain)});
+            use_access_maps_save.insert({port_name, cpy(convert_back_into_union_map)});
 
           }
           else{
+
             siphoned_from_input_port_ports.push_back(port_name);
             cout << "Does not exist in impl: directly siphoned off of input (in shift_registered_outputs)" << endl;
             cout << "Providing it the original domain and access map..." << endl;
             auto new_domain = buf.second.domain.at(writer_name);
-            cout << "Domain: " << str(new_domain) << endl;
             auto new_access_map = buf.second.access_map.at(writer_name);
+            cout << "Domain: " << str(new_domain) << endl;
             cout << "Access Map: " << str(new_access_map) << endl;
-            auto new_schedule = buf.second.schedule.at(writer_name);
-            cout << "Schedule: " << str(new_schedule) << endl;
-            // cout << "Bank rddom: " << str(impl.bank_rddom.at(l.first)) << endl;
-            // cout << "Abstract buffer name: " << buf.second.name << endl;
-            // cout << "Target buffer name: " << gimpl_targ_buf.name << endl;
-            // cout << "Original abstract using function: " << buf.second.get_ub_inst_name(l.first) << endl;
-            // cout << "Original abstract using function2: " << buf.second.get_ub_inst_name(l.first).erase(0, 3) << endl;
 
             // Now want to calculate the difference
             // Try projecting the range of the original on the range of the new
             auto inv_original_access_map = inv(buf_access_map);
-            auto inv_new_access_map = inv(new_access_map);
-            // cout << "Original inv access map: " << str(inv_original_access_map) << endl;
-            // cout << "New inv access map: " << str(inv_new_access_map) << endl;
             auto old_proj_onto_new = dot(new_access_map, inv_original_access_map);
-            auto old_proj_onto_new2 = dot(buf_access_map, inv_new_access_map);
-            // This is the corect one!!!!
             cout << "Old projected onto new: " << str(old_proj_onto_new) << endl;
-            // cout << "New Proj onto old: " << str(old_proj_onto_new2) << endl;
 
             // Get difference in domain between
             auto domain_new = to_uset(cpy(new_domain));
             auto domain_projected = domain(old_proj_onto_new);
-
-            cout << "Domain new: " << str(domain_new) << endl;
-            cout << "Domain projected: " << str(domain_projected) << endl;
-
             // Calculate difference
             auto diff_domains = diff(domain_new, domain_projected);
 
+            cout << "Domain new: " << str(domain_new) << endl;
+            cout << "Domain projected: " << str(domain_projected) << endl;
             cout << "Difference in domains: " << str(diff_domains) << endl;
+
+            // Save information for later...
+            use_domains_save.insert({port_name, cpy(new_domain)});
+            use_access_maps_save.insert({port_name, cpy(new_access_map)});
 
           }
 
         }
 
-        cout << endl << endl << endl << endl;
+        cout << endl << endl << endl;
 
       }
 
@@ -3019,7 +2976,6 @@ CoreIR::Module*  generate_coreir_without_ctrl(CodegenOptions& options,
         // These are the ones that are directly siphoned off another output port
         cout << "Shift reg output to output: " << sro.first << endl;
         cout << "The actual output and its int..." << sro.second.first << " " << sro.second.second << endl;
-        cout << endl << endl << endl;
 
         auto port_name = sro.first;
         auto writer_name = sro.second.first;
@@ -3028,20 +2984,16 @@ CoreIR::Module*  generate_coreir_without_ctrl(CodegenOptions& options,
         // Get domain and access map
         auto buf_access_map = buf.second.access_map.at(port_name);
         auto buf_domain = buf.second.domain.at(port_name);
-        auto buf_sched = buf.second.schedule.at(port_name);
 
         cout << "Domain: " << str(buf_domain) << endl;
         cout << "Access Map: " << str(buf_access_map) << endl;
-        cout << "Schedule: " << str(buf_sched) << endl;
 
         for(auto l : lowering_information) {
-          cout << "IMPL: " << l.first << " -> " << endl;
-          // Second is a GarnetImpl which ahs a targe_buf
+          cout << "IMPL: " << l.first << endl;
+          // Second is a GarnetImpl which has a target_buf
           auto gimpl = l.second;
           auto gimpl_targ_buf = gimpl.target_buf;
-          // cout << "TARGET BUF: " << endl << gimpl_targ_buf << endl;
           bool exists_in_impl = gimpl_targ_buf.access_map.count(port_name) > 0;
-          cout << "Exists in impl: " << exists_in_impl << endl;
 
           if(exists_in_impl){
             cout << "THIS SHOULDN'T HAPPEN" << endl;
@@ -3065,83 +3017,47 @@ CoreIR::Module*  generate_coreir_without_ctrl(CodegenOptions& options,
             siphoned_from_normal_port_ports.push_back({port_name, writer_name_use});
 
             // Trace the writer name back to the original buffer output port....
-
-            cout << "Writer names use: " << writer_name_use << endl;
-            cout << "BAD: Writer name: " << writer_name << endl;
-
             cout << "Does not exist in impl: directly siphoned off of another output (in shift_registered_outputs_outputs)" << endl;
-            cout << "Providing it the original domain and access map..." << endl;
-            auto new_domain = buf.second.domain.at(writer_name_use);
-            // auto new_access_map = buf.second.access_map.at(writer_name);
-            auto new_access_map = buf.second.access_map_non_simplified.at(writer_name_use);
-            auto new_schedule = buf.second.schedule.at(writer_name_use);
+            cout << "Providing it the original domain and access map for port: " << writer_name_use << endl;
+            // We get the domain and access map directly from the saved information in the previous set of loops over shift-registered outputs
+            auto new_domain = use_domains_save.at(writer_name_use);
+            auto new_access_map = use_access_maps_save.at(writer_name_use);
             cout << "Domain: " << str(new_domain) << endl;
             cout << "Access Map: " << str(new_access_map) << endl;
-            cout << "Schedule: " << str(new_schedule) << endl;
             // Now want to calculate the difference
-
-
-            auto copied_access_map = cpy(new_access_map);
-            // cout << "COPIED ACCESS MAP: " << str(copied_access_map) << endl;
-            // cout << "NUMBER REFS TO MAP: " << str(copied_access_map->ref) << endl;
-            auto converted_from_union_map_to_map = to_map(copied_access_map);
-            // cout << "Check map is not null: " << (converted_from_union_map_to_map != nullptr) << endl;
-            if(converted_from_union_map_to_map == nullptr){
-              cout << "Converted map is null" << endl;
-              assert(false);
-            }
-            auto renamed_access_map = set_range_name(converted_from_union_map_to_map, buf.second.name);
-
-            auto convert_back_into_union_map = to_umap(renamed_access_map);
-            // cout << "Check map is not null: " << (convert_back_into_union_map != nullptr) << endl;
-            if(convert_back_into_union_map == nullptr){
-              cout << "re-Converted map is null" << endl;
-              assert(false);
-            }
-            // cout << "Renamed access map: " << str(convert_back_into_union_map) << endl;
 
             // Try projecting the range of the original on the range of the new
             // auto inv_original_access_map = inv_in_place(buf_access_map);
             auto inv_original_access_map = inv(buf_access_map);
-            auto inv_new_access_map = inv(convert_back_into_union_map);
-            // auto inv_new_access_map = inv_in_place(convert_back_into_union_map);
-            // cout << "Renamed access map after in place: " << str(convert_back_into_union_map) << endl;
-            // cout << "Original inv access map : " << str(inv(buf_access_map)) << endl;
-            // cout << "New inv access map: " << str(inv(new_access_map)) << endl;
-            // cout << "New inv access map (renamed): " << str(inv_new_access_map) << endl;
-            auto old_proj_onto_new = dot(convert_back_into_union_map, inv_original_access_map);
+            auto inv_new_access_map = inv(new_access_map);
+            auto old_proj_onto_new = dot(new_access_map, inv_original_access_map);
             cout << "Old projected onto new: " << str(old_proj_onto_new) << endl;
-            // cout << "New Proj onto old: " << str(old_proj_onto_new2) << endl;
 
             // Get difference in domain between
             auto domain_new = to_uset(cpy(new_domain));
             auto domain_projected = domain(old_proj_onto_new);
-
-            cout << "Domain new: " << str(domain_new) << endl;
-            cout << "Domain projected: " << str(domain_projected) << endl;
-
             // Calculate difference
             auto diff_domains = diff(domain_new, domain_projected);
-
+            cout << "Domain new: " << str(domain_new) << endl;
+            cout << "Domain projected: " << str(domain_projected) << endl;
             cout << "Difference in domains: " << str(diff_domains) << endl;
 
           }
 
         }
 
-
-        cout << endl << endl << endl << endl;
+        cout << endl << endl << endl;
 
       }
 
+      // Special catch for apps I'm working on...
       if((buf.first == "hw_input_global_wrapper_stencil") || (buf.first == "hw_input_global_wrapper_stencil_bank_2")){
-        cout << "Dying early for information" << endl;
+        cout << "Printing out buffer information..." << endl;
         cout << "Normal Ports" << endl << normal_ports << endl;
         cout << "Siphoned from input port ports" << endl << siphoned_from_input_port_ports << endl;
         cout << "Siphoned from normal port ports" << endl << siphoned_from_normal_port_ports << endl;
-        assert(false);
+        // assert(false);
       }
-      // assert(false);
 
       cout << "Printing bank capacity..." << endl;
       for (auto it : impl.bank_readers) {
