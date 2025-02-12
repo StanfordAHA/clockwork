@@ -2901,7 +2901,7 @@ CoreIR::Module*  generate_coreir_without_ctrl(CodegenOptions& options,
 
 
 
-            cout << "Bank rddom: " << str(impl.bank_rddom.at(0)) << endl;
+            cout << "Bank rddom: " << str(impl.bank_rddom.at(l.first)) << endl;
             cout << "Abstract buffer name: " << buf.second.name << endl;
             cout << "Target buffer name: " << gimpl_targ_buf.name << endl;
             cout << "Original abstract using function: " << buf.second.get_ub_inst_name(l.first) << endl;
@@ -2910,6 +2910,8 @@ CoreIR::Module*  generate_coreir_without_ctrl(CodegenOptions& options,
             // Copy access map and rename range to original buffer...
             cout << "Convert union map to map???" << endl;
             auto copied_access_map = cpy(new_access_map);
+            cout << "COPIED ACCESS MAP: " << str(copied_access_map) << endl;
+            // cout << "NUMBER REFS TO MAP: " << str(copied_access_map->ref) << endl;
             auto converted_from_union_map_to_map = to_map(copied_access_map);
             cout << "Check map is not null: " << (converted_from_union_map_to_map != nullptr) << endl;
             if(converted_from_union_map_to_map == nullptr){
@@ -2927,10 +2929,18 @@ CoreIR::Module*  generate_coreir_without_ctrl(CodegenOptions& options,
             cout << "Renamed access map: " << str(convert_back_into_union_map) << endl;
 
             // Try projecting the range of the original on the range of the new
+            // auto inv_original_access_map = inv_in_place(buf_access_map);
             auto inv_original_access_map = inv(buf_access_map);
             auto inv_new_access_map = inv(convert_back_into_union_map);
+            // auto inv_new_access_map = inv_in_place(convert_back_into_union_map);
+            cout << "Renamed access map after in place: " << str(convert_back_into_union_map) << endl;
 
             cout << "Original inv access map : " << str(inv(buf_access_map)) << endl;
+
+            // flatten buf_access_map
+            auto buf_access_map_flat = flatten_umap_domain(ctx(buf_access_map), buf_access_map);
+            cout << "Flattened access map: " << str(buf_access_map_flat) << endl;
+
             cout << "New inv access map: " << str(inv(new_access_map)) << endl;
             cout << "New inv access map (renamed): " << str(inv_new_access_map) << endl;
             auto old_proj_onto_new = dot(convert_back_into_union_map, inv_original_access_map);
@@ -2958,7 +2968,7 @@ CoreIR::Module*  generate_coreir_without_ctrl(CodegenOptions& options,
             cout << "Schedule: " << str(new_schedule) << endl;
 
 
-            cout << "Bank rddom: " << str(impl.bank_rddom.at(0)) << endl;
+            cout << "Bank rddom: " << str(impl.bank_rddom.at(l.first)) << endl;
             cout << "Abstract buffer name: " << buf.second.name << endl;
             cout << "Target buffer name: " << gimpl_targ_buf.name << endl;
             cout << "Original abstract using function: " << buf.second.get_ub_inst_name(l.first) << endl;
@@ -2991,16 +3001,22 @@ CoreIR::Module*  generate_coreir_without_ctrl(CodegenOptions& options,
           }
 
         }
+
+        cout << endl << endl << endl << endl;
+
       }
 
+      std::string write_name_save = "";
+
       for(auto sro : impl.shift_registered_outputs_to_outputs){
-        // These are the ones that are directly siphoned off the input
+        // These are the ones that are directly siphoned off another output port
         cout << "Shift reg output to output: " << sro.first << endl;
         cout << "The actual output and its int..." << sro.second.first << " " << sro.second.second << endl;
         cout << endl << endl << endl;
 
         auto port_name = sro.first;
         auto writer_name = sro.second.first;
+
         // Now we have the port name - find it in the original buf and print its information
         // Get domain and access map
         auto buf_access_map = buf.second.access_map.at(port_name);
@@ -3021,18 +3037,38 @@ CoreIR::Module*  generate_coreir_without_ctrl(CodegenOptions& options,
           cout << "Exists in impl: " << exists_in_impl << endl;
 
           if(exists_in_impl){
-            auto new_domain = gimpl_targ_buf.domain.at(port_name);
-            auto new_access_map = gimpl_targ_buf.access_map.at(port_name);
-            auto new_schedule = gimpl_targ_buf.schedule.at(port_name);
+            cout << "THIS SHOULDN'T HAPPEN" << endl;
+            assert(false);
+            // auto new_domain = gimpl_targ_buf.domain.at(port_name);
+            // auto new_access_map = gimpl_targ_buf.access_map.at(port_name);
+            // auto new_schedule = gimpl_targ_buf.schedule.at(port_name);
 
-            cout << "Domain: " << str(new_domain) << endl;
-            cout << "Access Map: " << str(new_access_map) << endl;
-            cout << "Schedule: " << str(new_schedule) << endl;
+            // cout << "Domain: " << str(new_domain) << endl;
+            // cout << "Access Map: " << str(new_access_map) << endl;
+            // cout << "Schedule: " << str(new_schedule) << endl;
 
             // Now want to calculate the difference
           }
           else{
-            cout << "Does not exist in impl: directly siphoned off of input (in shift_registered_outputs)" << endl;
+
+            // If the port writer is in the shift_registered_outputs, then we should use the writer name, else use the saved name
+            auto writer_name_use = writer_name;
+
+            // Check if it's in there...
+            auto in_sro = impl.shift_registered_outputs.count(writer_name_use) > 0;
+
+            if(in_sro){
+              write_name_save = writer_name_use;
+            }
+            else{
+              writer_name_use = write_name_save;
+            }
+
+            siphoned_from_normal_port_ports.push_back({port_name, writer_name_use});
+
+            // Trace the writer name back to the original buffer output port....
+
+            cout << "Does not exist in impl: directly siphoned off of another output (in shift_registered_outputs_outputs)" << endl;
             cout << "Providing it the original domain and access map..." << endl;
             auto new_domain = buf.second.domain.at(writer_name);
             auto new_access_map = buf.second.access_map.at(writer_name);
@@ -3044,6 +3080,10 @@ CoreIR::Module*  generate_coreir_without_ctrl(CodegenOptions& options,
           }
 
         }
+
+
+        cout << endl << endl << endl << endl;
+
       }
 
       if((buf.first == "hw_input_global_wrapper_stencil") || (buf.first == "hw_input_global_wrapper_stencil_bank_2")){

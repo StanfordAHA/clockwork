@@ -5146,6 +5146,9 @@ umap* prog::validity_deps() {
     auto reads =
       its(consumer_map(b), domain);
 
+    cout << "Producer Map = " << str(producer_map(b)) << endl;
+    cout << "Consumer Map = " << str(consumer_map(b)) << endl;
+
     cout << "MEK Writes = " << str(writes) << endl;
     cout << "MEK Reads = " << str(reads) << endl;
 
