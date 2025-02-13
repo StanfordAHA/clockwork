@@ -1154,7 +1154,7 @@ map<string, UBuffer> build_buffers(prog& prg, umap* opt_sched) {
 
       assert(contains_key(op, domains));
 
-      cout << "\tAdding output port: " << pt_name << endl;
+      cout << "\tAdding input port: " << pt_name << endl;
       cout << "\t\tConsumed: " << str(consumed_here) << endl;
       buf.add_in_pt(pt_name, domains.at(op), consumed_here, its(opt_sched, domains.at(op)));
 
@@ -1163,7 +1163,7 @@ map<string, UBuffer> build_buffers(prog& prg, umap* opt_sched) {
       }
 
       vector<string> inpt = buf.get_in_ports();
-      cout << "current out port name: " << endl;
+      cout << "current in port name: " << endl;
       for_each(inpt.begin(), inpt.end(), [](string pt_name){cout <<"\t" << pt_name;});
       cout << endl;
 
@@ -1287,13 +1287,6 @@ map<string, UBuffer> build_buffers(prog& prg, umap* opt_sched, schedule_info & h
 
   cout << endl;
 
-  cout << "Printing all domains..." << endl;
-  for (auto dom : domains) {
-    cout << dom.first->name << endl;
-    isl_printer_print_union_set(p, to_uset(dom.second));
-    cout << endl;
-  }
-
   //sort all ops by its name instead of ptr addres
   //to avoid uncertainty in buffer name
   vector<op*> all_op_vec(all_op.begin(), all_op.end());
@@ -1398,19 +1391,6 @@ map<string, UBuffer> build_buffers(prog& prg, umap* opt_sched, schedule_info & h
       UBuffer& buf = buffers.at(name);
 
       cout << "(2) Creating name out of " << name << " and " << op->name << " and " << usuffix << endl;
-      cout << "Printing validity deps..." << endl;
-      string vd_str = str(vd);
-      std::replace(vd_str.begin(), vd_str.end(), ';', '\n');
-      string vd_war_str = str(vd_war);
-      std::replace(vd_war_str.begin(), vd_war_str.end(), ';', '\n');
-      cout << vd_str << endl;
-      cout << endl << endl << endl;
-      cout << "Printing validity deps WAR..." << endl;
-      cout << vd_war_str << endl;
-      // We have the validity deps here...
-      // We need to find the validity deps for the current op
-      cout << "Printing OP" << endl;
-      cout << op << endl;
 
       auto buffer_name = name;
       auto op_name = op->name;
@@ -1424,8 +1404,6 @@ map<string, UBuffer> build_buffers(prog& prg, umap* opt_sched, schedule_info & h
 
       string pt_name = name + "_" + op->name + "_" + to_string(usuffix);
       buf.port_bundles[op->name + "_read"].push_back(pt_name);
-
-
 
       string cond = "{ ";
       for (auto sec_pair : consumed.second) {

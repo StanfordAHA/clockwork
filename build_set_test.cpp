@@ -21343,20 +21343,35 @@ void compile_for_garnet_single_port_mem(prog& prg,
           prg.whole_iteration_domain());
   cout << "result schedule: " << str(hw_sched) << endl;
   auto buffers_opt = build_buffers(prg, hw_sched, sched);
-  for ( auto const& [key, val]: buffers_opt) {
-    // isl_printer* p2 = isl_printer_to_file(isl_map_get_ctx(val), stdout);
-    // cout << str(key) << " -> " << str() << endl;
-    cout << key << "->" << val.name << endl;
-    cout << "BUFFER SCHED" << endl;
-    isl_printer_print_union_map(p, val.global_schedule());
-    cout << endl;
-    cout << val << endl;
-    cout << endl;
-    cout << endl;
-    // cout << key << "->" << str(val.hardware) << endl;
-    // cout << p2 << endl;
-    // isl_printer_print_map(p, val);
+
+  cout << endl << endl << endl;
+
+  // Calculate dependencies here...
+  for(auto buf_kp : buffers_opt){
+    // cout << "Calculating deps for buffer: " << buf_kp.first << endl;
+    // Use at instead of the iterator otherwise it's a copy
+    buffers_opt.at(buf_kp.first).populate_rv_deps();
   }
+
+  cout << endl << endl << endl;
+
+  for(auto buf_kp : buffers_opt){
+    auto buf = buf_kp.second;
+    if(buf.dependencies_str.size() > 0){
+      cout << "Showing deps for buffer: " << buf_kp.first << endl << endl;
+    }
+    for(auto dep_info : buf.dependencies_str){
+      auto port_pair = dep_info.first;
+      auto dep_str = dep_info.second;
+      cout << port_pair.first << " -> " << port_pair.second << " :\n" << dep_str << endl << endl;
+    }
+    if(buf.dependencies_str.size() > 0){
+      cout << endl << endl << endl;
+    }
+  }
+
+  // assert(false);
+
   auto sched_max = lexmaxpt(range(hw_sched));
   cout << "Latency of application is: " << str((sched_max)) << endl;
 

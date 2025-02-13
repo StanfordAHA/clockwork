@@ -5173,7 +5173,6 @@ umap* prog::validity_deps() {
   return valid;
 }
 
-
 umap* prog::validity_deps_WAR() {
 
   cout << "COMPUTING WAR DEPS" << endl;

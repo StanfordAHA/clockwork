@@ -1069,6 +1069,11 @@ class UBuffer {
     std::map<string, bool> isIn;
     std::map<string, isl_set*> domain;
 
+    // Dependencies are a map from a pair of ports to a
+    // vector of counter-to-counter constraints
+    std::map<std::pair<string, string>, vector<int>> dependencies;
+    std::map<std::pair<string, string>, string> dependencies_str;
+
     int coarse_grained_pipeline_loop_level;
 
     //This is used to retrive the flattened iteration domain
@@ -1112,6 +1117,70 @@ class UBuffer {
         config_file = config;
     }
 #endif
+
+    void populate_rv_deps(){
+      cout << "POPULATE_RV_DEPS" << endl;
+      // Here, can we calculate the dependency live?
+      for(auto outpt__: get_out_ports()){
+
+        cout << "Current output port is: " << outpt__ << endl;
+
+        for(auto inpt__: get_in_ports()){
+          cout << "Comparing against input port: " << inpt__ << endl;
+          // Get the maps for each
+          auto writer_access_map = access_map.at(inpt__);
+          auto writer_sched_map = schedule.at(inpt__);
+          auto writer_domain = domain.at(inpt__);
+
+          auto reader_access_map = access_map.at(outpt__);
+          auto reader_sched_map = schedule.at(outpt__);
+          auto reader_domain = domain.at(outpt__);
+
+          // cout << "Writer Access Map: " << endl << str(writer_access_map) << endl;
+          // cout << "Writer Schedule Map: " << endl << str(writer_sched_map) << endl;
+          // cout << "Writer Domain: " << endl << str(writer_domain) << endl;
+
+          // cout << "Reader Access Map: " << endl << str(reader_access_map) << endl;
+          // cout << "Reader Schedule Map: " << endl << str(reader_sched_map) << endl;
+          // cout << "Reader Domain: " << endl << str(reader_domain) << endl;
+
+          // This is the exact string that is in the consumer map - so let's use this in calculating the deps
+          auto inv_reads = inv(reader_access_map);
+          auto inv_writes = inv(writer_access_map);
+          auto writers_to_this_read = dot(writer_access_map, inv_reads);
+          auto readers_to_this_write = dot(reader_access_map, inv_writes);
+
+          vector<uset*> user_domains;
+          vector<umap*> user_schedules;
+          user_domains.push_back(to_uset(writer_domain));
+          user_domains.push_back(to_uset(reader_domain));
+          user_schedules.push_back(writer_sched_map);
+          user_schedules.push_back(reader_sched_map);
+
+          uset* union_domain = unn(user_domains);
+          umap* naive_sched = unn(user_schedules);
+          umap* user_sched = its(naive_sched, union_domain);
+          auto before = lex_lt(user_sched, user_sched);
+          auto raw_validity = its(writers_to_this_read, before);
+          auto war_validity = its(readers_to_this_write, before);
+
+          cout << "POPRVDEPS: Validity (RAW) = " << endl << str(raw_validity) << endl;
+          cout << "POPRVDEPS: Validity (WAR) = " << endl << str(war_validity) << endl;
+
+          // Add RAW dep: RD dep on WR -> RAW str
+          dependencies_str.insert({{outpt__, inpt__}, str(raw_validity)});
+          // Add WAR dep: WR dep on RD -> WAR str
+          dependencies_str.insert({{inpt__, outpt__}, str(war_validity)});
+
+          // cout << "MEK" << endl;
+          // cout << dependencies_str.at({outpt__, inpt__}) << endl;
+          // cout << endl << endl << endl;
+
+        }
+
+      }
+
+    }
 
     int logical_dimension();
 
