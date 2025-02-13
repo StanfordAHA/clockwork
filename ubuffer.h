@@ -1118,6 +1118,82 @@ class UBuffer {
     }
 #endif
 
+    vector<std::string> tokenize_string(std::string str, std::string delimiter) {
+        std::vector<std::string> tokens;
+        size_t pos = 0;
+        std::string token;
+        while ((pos = str.find(delimiter)) != std::string::npos) {
+            token = str.substr(0, pos);
+            tokens.push_back(token);
+            str.erase(0, pos + delimiter.length());
+        }
+        tokens.push_back(str);
+        return tokens;
+    }
+
+    vector<int> extract_dep_vec_from_dep_str(std::string dep_str){
+
+      vector<string> filtered;
+      vector<int> scalar_offsets_raw;
+
+      if(dep_str == "{  }"){
+        cout << "Empty dep string..." << endl;
+        return scalar_offsets_raw;
+      }
+
+      // Next get the tuple of strings on each side - just get the right side - so
+      // Split the string on ->
+      auto split_string = tokenize_string(dep_str, "->");
+      auto right_string = split_string.at(1);
+      auto access_string = tokenize_string(right_string, "[");
+      auto access_substring = access_string.at(1);
+      auto access_substring2 = tokenize_string(access_substring, "]");
+      auto access_substring3 = access_substring2.at(0);
+      auto access_substring4 = tokenize_string(access_substring3, ",");
+
+      // cout << split_string << endl;
+      // cout << right_string << endl;
+      // cout << access_string << endl;
+      // cout << access_substring << endl;
+      // cout << access_substring2 << endl;
+      // cout << access_substring3 << endl;
+
+      // Now split on comma
+      // Now we have the three elements
+      for(auto it: access_substring4){
+        cout << it << endl;
+        if(it.find("root") == std::string::npos){
+          filtered.push_back(tokenize_string(it, "= ").at(1));
+        }
+      }
+
+      // Now collect the final things...
+      // Filter out root
+      cout << "Printing filtered..." << endl;
+      for(auto it: filtered){
+        cout << it << endl;
+      }
+
+      // Assume for now there is only scalar offsets...
+      for(auto it: filtered){
+        // Check for a plus - if it finds it, extract it
+        if(it.find("+") != std::string::npos){
+          // Split on +
+          auto plus_split = tokenize_string(it, "+");
+          // Now get the first element
+          auto first = plus_split.at(0);
+          scalar_offsets_raw.push_back(stoi(first));
+        }
+        else{
+          // This is the case where the iterator is == (may need to handle this somehow since non-zero cycle write.)
+          scalar_offsets_raw.push_back(0);
+        }
+      }
+
+      return scalar_offsets_raw;
+
+    }
+
     void populate_rv_deps(){
       cout << "POPULATE_RV_DEPS" << endl;
       // Here, can we calculate the dependency live?
@@ -1172,9 +1248,32 @@ class UBuffer {
           // Add WAR dep: WR dep on RD -> WAR str
           dependencies_str.insert({{inpt__, outpt__}, str(war_validity)});
 
-          // cout << "MEK" << endl;
-          // cout << dependencies_str.at({outpt__, inpt__}) << endl;
-          // cout << endl << endl << endl;
+          // Do some string analysis to calculate the scalar deps
+          auto raw_string = str(raw_validity);
+          auto war_string = str(war_validity);
+
+          auto raw_vec = extract_dep_vec_from_dep_str(raw_string);
+          auto war_vec = extract_dep_vec_from_dep_str(war_string);
+
+          if(raw_vec.size() == 0){
+            cout << "RAW vec is empty" << endl;
+
+            cout << "Writer Access Map: " << endl << str(writer_access_map) << endl;
+            cout << "Writer Schedule Map: " << endl << str(writer_sched_map) << endl;
+            cout << "Writer Domain: " << endl << str(writer_domain) << endl;
+
+            cout << "Reader Access Map: " << endl << str(reader_access_map) << endl;
+            cout << "Reader Schedule Map: " << endl << str(reader_sched_map) << endl;
+            cout << "Reader Domain: " << endl << str(reader_domain) << endl;
+
+            cout << "RAW String: " << raw_string << endl;
+            cout << "WAR String: " << war_string << endl;
+          }
+
+          // Add RAW dep: RD dep on WR -> RAW str
+          dependencies.insert({{outpt__, inpt__}, raw_vec});
+          // Add WAR dep: WR dep on RD -> WAR str
+          dependencies.insert({{inpt__, outpt__}, war_vec});
 
         }
 

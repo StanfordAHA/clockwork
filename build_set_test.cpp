@@ -21358,15 +21358,19 @@ void compile_for_garnet_single_port_mem(prog& prg,
   for(auto buf_kp : buffers_opt){
     auto buf = buf_kp.second;
     if(buf.dependencies_str.size() > 0){
-      cout << "Showing deps for buffer: " << buf_kp.first << endl << endl;
-    }
-    for(auto dep_info : buf.dependencies_str){
-      auto port_pair = dep_info.first;
-      auto dep_str = dep_info.second;
-      cout << port_pair.first << " -> " << port_pair.second << " :\n" << dep_str << endl << endl;
-    }
-    if(buf.dependencies_str.size() > 0){
-      cout << endl << endl << endl;
+      cout << "Showing deps for buffer: " << buf_kp.first << endl;
+      // for(auto dep_info : buf.dependencies_str){
+      //   auto port_pair = dep_info.first;
+      //   auto dep_str = dep_info.second;
+      //   cout << port_pair.first << " -> " << port_pair.second << " :\n" << dep_str << endl << endl;
+      // }
+      // cout << endl << endl << endl;
+      for(auto dep_info : buf.dependencies){
+        auto port_pair = dep_info.first;
+        auto dep_vec = dep_info.second;
+        cout << port_pair.first << " -> " << port_pair.second << " : " << dep_vec << endl;
+      }
+      cout << endl;
     }
   }
 
