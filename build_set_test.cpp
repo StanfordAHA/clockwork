@@ -21350,7 +21350,7 @@ void compile_for_garnet_single_port_mem(prog& prg,
   for(auto buf_kp : buffers_opt){
     // cout << "Calculating deps for buffer: " << buf_kp.first << endl;
     // Use at instead of the iterator otherwise it's a copy
-    buffers_opt.at(buf_kp.first).populate_rv_deps();
+    buffers_opt.at(buf_kp.first).populate_rv_deps(false);
   }
 
   cout << endl << endl << endl;
@@ -21387,44 +21387,29 @@ void compile_for_garnet_single_port_mem(prog& prg,
   // assert(false);
   //FIXME: put into separate pass for power analysis
 
-  cout << "MEKK 9" << endl;
-
   if (energy_model) {
-    cout << "MEKK 10" << endl;
     mem_access_cnt mem_access;
     Mem_access_count(options, buffers_opt, mem_access, prg);
     emit_mem_access_count_to_csv(dir + "/MemCount/" + prg.name, options, mem_access);
 
     power_analysis_params power_params;
     power_analysis_info power_stats;
-    cout << "MEKK 11" << endl;
     Init_PE_energy_cost(power_params);
-    cout << "MEKK 12" << endl;
 
     #ifdef COREIR
-        cout << "MEKK 13" << endl;
         PE_energy_cost_instance_model(power_params, power_stats, prg);
-        cout << "MEKK 14" << endl;
         PE_energy_cost(power_params, power_stats, prg);
-        cout << "MEKK 15" << endl;
     #endif
 
   }
 
-  cout << "MEKK 10.1" << endl;
-
 #ifdef COREIR
   generate_garnet_coreir(buffers_opt, prg, options, sched, use_metamapper, dse_compute_filename);
-  cout << "MEKK 11" << endl;
   if (!options.config_gen_only) {
-    cout << "MEKK 11-1" << endl;
     generate_garnet_verilog_top(options, prg.name);
-    cout << "MEKK 11-2" << endl;
     generate_garnet_verilator_tb(options, prg, hw_sched, buffers_opt);
-    cout << "MEKK 11-3" << endl;
   }
 #endif
-    cout << "MEKK 12" << endl;
 }
 
 bool schedule_bounds_fit_controller_bitwidth(const int bitwidth, schedule_info& sched, prog& prg) {

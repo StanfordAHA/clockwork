@@ -2853,6 +2853,26 @@ CoreIR::Module*  generate_coreir_without_ctrl(CodegenOptions& options,
       cout << "PRINTING GARNET LOWERING" << endl;
       // Get lowering info from impl...
       auto lowering_information = impl.lowering_info;
+
+      cout << "POPULATING DEPENDENCIES ON LOWERED BUFFER" << endl;
+      for(auto l : lowering_information){
+        impl.lowering_info.at(l.first).target_buf.populate_rv_deps(true);
+      }
+
+      cout << "SHOW LOWERED BUFFS" << endl;
+      for(auto l : lowering_information){
+        auto buf = impl.lowering_info.at(l.first).target_buf;
+        if(buf.dependencies.size() > 0){
+          cout << "(LOWERED) Showing deps for buffer: " << l.first << endl;
+          for(auto dep_info : buf.dependencies){
+            auto port_pair = dep_info.first;
+            auto dep_vec = dep_info.second;
+            cout << port_pair.first << " -> " << port_pair.second << " : " << dep_vec << endl;
+          }
+          cout << endl;
+        }
+      }
+
       // TODO: Check here if the lowered information has infomation on the changed buffer
       cout << "GETTING INFO FOR FILTERING: " << buf.first << endl;
 

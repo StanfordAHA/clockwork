@@ -1194,7 +1194,7 @@ class UBuffer {
 
     }
 
-    void populate_rv_deps(){
+    void populate_rv_deps(bool lowered){
       cout << "POPULATE_RV_DEPS" << endl;
       // Here, can we calculate the dependency live?
       for(auto outpt__: get_out_ports()){
@@ -1205,20 +1205,26 @@ class UBuffer {
           cout << "Comparing against input port: " << inpt__ << endl;
           // Get the maps for each
           auto writer_access_map = access_map.at(inpt__);
+          if(lowered){
+            writer_access_map = access_map_non_simplified.at(inpt__);
+          }
           auto writer_sched_map = schedule.at(inpt__);
           auto writer_domain = domain.at(inpt__);
 
           auto reader_access_map = access_map.at(outpt__);
+          if(lowered){
+            reader_access_map = access_map_non_simplified.at(outpt__);
+          }
           auto reader_sched_map = schedule.at(outpt__);
           auto reader_domain = domain.at(outpt__);
 
-          // cout << "Writer Access Map: " << endl << str(writer_access_map) << endl;
-          // cout << "Writer Schedule Map: " << endl << str(writer_sched_map) << endl;
-          // cout << "Writer Domain: " << endl << str(writer_domain) << endl;
+          cout << "Writer Access Map: " << endl << str(writer_access_map) << endl;
+          cout << "Writer Schedule Map: " << endl << str(writer_sched_map) << endl;
+          cout << "Writer Domain: " << endl << str(writer_domain) << endl;
 
-          // cout << "Reader Access Map: " << endl << str(reader_access_map) << endl;
-          // cout << "Reader Schedule Map: " << endl << str(reader_sched_map) << endl;
-          // cout << "Reader Domain: " << endl << str(reader_domain) << endl;
+          cout << "Reader Access Map: " << endl << str(reader_access_map) << endl;
+          cout << "Reader Schedule Map: " << endl << str(reader_sched_map) << endl;
+          cout << "Reader Domain: " << endl << str(reader_domain) << endl;
 
           // This is the exact string that is in the consumer map - so let's use this in calculating the deps
           auto inv_reads = inv(reader_access_map);
