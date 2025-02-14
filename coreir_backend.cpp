@@ -2932,6 +2932,13 @@ CoreIR::Module*  generate_coreir_without_ctrl(CodegenOptions& options,
               assert(false);
             }
 
+            // (LOWERED) Showing deps for buffer: 2
+            // hw_input_global_wrapper_stencil_op_hcompute_conv_stencil_10 -> hw_input_global_wrapper_stencil_op_hcompute_hw_input_global_wrapper_stencil_2 : {}
+            // hw_input_global_wrapper_stencil_op_hcompute_conv_stencil_7 -> hw_input_global_wrapper_stencil_op_hcompute_hw_input_global_wrapper_stencil_2 : {0, 0}
+            // hw_input_global_wrapper_stencil_op_hcompute_hw_input_global_wrapper_stencil_2 -> hw_input_global_wrapper_stencil_op_hcompute_conv_stencil_10 : {}
+            // hw_input_global_wrapper_stencil_op_hcompute_hw_input_global_wrapper_stencil_2 -> hw_input_global_wrapper_stencil_op_hcompute_conv_stencil_7 : {}
+
+
             // Try projecting the range of the original on the range of the new
             auto inv_original_access_map = inv(buf_access_map);
             auto old_proj_onto_new = dot(convert_back_into_union_map, inv_original_access_map);

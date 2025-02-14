@@ -1250,7 +1250,22 @@ void UBufferImpl::merge_banks_and_rewrite(vector<int> & banks_tobe_merged, bool 
   for(auto tb : target_buffers){
     for(auto it : tb.access_map_non_simplified) {
       cout << it.first << " : " << str(it.second) << endl;
-      merged_impl.target_buf.access_map_non_simplified.insert(it);
+      auto copy_access_map = cpy(it.second);
+      // Rename the range to the new bank name...
+      auto converted_from_union_map_to_map = to_map(copy_access_map);
+      if(converted_from_union_map_to_map == nullptr){
+        cout << "Converted map is null" << endl;
+        assert(false);
+      }
+      auto renamed_access_map = set_range_name(converted_from_union_map_to_map, new_sram_name);
+
+      auto final_access_map = to_umap(renamed_access_map);
+      if(final_access_map == nullptr){
+        cout << "re-Converted map is null" << endl;
+        assert(false);
+      }
+
+      merged_impl.target_buf.access_map_non_simplified.insert({it.first, final_access_map});
     }
   }
 

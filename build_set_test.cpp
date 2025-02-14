@@ -21346,11 +21346,15 @@ void compile_for_garnet_single_port_mem(prog& prg,
 
   cout << endl << endl << endl;
 
+  cout << "Printing buffer information...MEK" << endl;
+
   // Calculate dependencies here...
   for(auto buf_kp : buffers_opt){
     // cout << "Calculating deps for buffer: " << buf_kp.first << endl;
     // Use at instead of the iterator otherwise it's a copy
     buffers_opt.at(buf_kp.first).populate_rv_deps(false);
+    cout << "Buffer: " << buf_kp.first << endl;
+    cout << buf_kp.second << endl;
   }
 
   cout << endl << endl << endl;
