@@ -2938,7 +2938,6 @@ CoreIR::Module*  generate_coreir_without_ctrl(CodegenOptions& options,
             // hw_input_global_wrapper_stencil_op_hcompute_hw_input_global_wrapper_stencil_2 -> hw_input_global_wrapper_stencil_op_hcompute_conv_stencil_10 : {}
             // hw_input_global_wrapper_stencil_op_hcompute_hw_input_global_wrapper_stencil_2 -> hw_input_global_wrapper_stencil_op_hcompute_conv_stencil_7 : {}
 
-
             // Try projecting the range of the original on the range of the new
             auto inv_original_access_map = inv(buf_access_map);
             auto old_proj_onto_new = dot(convert_back_into_union_map, inv_original_access_map);
@@ -2953,6 +2952,16 @@ CoreIR::Module*  generate_coreir_without_ctrl(CodegenOptions& options,
             cout << "Domain new: " << str(domain_new) << endl;
             cout << "Domain projected: " << str(domain_projected) << endl;
             cout << "Difference in domains: " << str(diff_domains) << endl;
+
+            // Copy the original and new domains and domain difference...
+            // gimpl_targ_buf.original_domain[port_name] = cpy(buf_domain);
+            // gimpl_targ_buf.new_domain[port_name] = cpy(new_domain);
+            // gimpl_targ_buf.domain_difference[port_name] = to_set(cpy(diff_domains));
+
+            // Need to do it without copying the object...
+            impl.lowering_info.at(l.first).target_buf.original_domain[port_name] = cpy(buf_domain);
+            impl.lowering_info.at(l.first).target_buf.new_domain[port_name] = cpy(new_domain);
+            impl.lowering_info.at(l.first).target_buf.domain_difference[port_name] = to_set(cpy(diff_domains));
 
             // Save information for later...
             use_domains_save.insert({port_name, cpy(new_domain)});
@@ -2985,15 +2994,32 @@ CoreIR::Module*  generate_coreir_without_ctrl(CodegenOptions& options,
             cout << "Domain projected: " << str(domain_projected) << endl;
             cout << "Difference in domains: " << str(diff_domains) << endl;
 
+            // Copy the original and new domains and domain difference...
+            // gimpl_targ_buf.original_domain[port_name] = cpy(buf_domain);
+            // gimpl_targ_buf.new_domain[port_name] = cpy(new_domain);
+            // gimpl_targ_buf.domain_difference[port_name] = to_set(cpy(diff_domains));
+            impl.lowering_info.at(l.first).target_buf.original_domain[port_name] = cpy(buf_domain);
+            impl.lowering_info.at(l.first).target_buf.new_domain[port_name] = cpy(new_domain);
+            impl.lowering_info.at(l.first).target_buf.domain_difference[port_name] = to_set(cpy(diff_domains));
+
+
             // Save information for later...
             use_domains_save.insert({port_name, cpy(new_domain)});
             use_access_maps_save.insert({port_name, cpy(new_access_map)});
 
           }
+          cout << "PRINT GIMPL DOMAIN DIFFERENCES" << endl;
+          for(auto dd_it:gimpl_targ_buf.domain_difference){
+            cout << dd_it.first << " -> " << str(dd_it.second) << endl;
+          }
+          cout << endl << endl << endl;
+
 
         }
 
         cout << endl << endl << endl;
+
+
 
       }
 
@@ -3068,6 +3094,11 @@ CoreIR::Module*  generate_coreir_without_ctrl(CodegenOptions& options,
             cout << "Domain new: " << str(domain_new) << endl;
             cout << "Domain projected: " << str(domain_projected) << endl;
             cout << "Difference in domains: " << str(diff_domains) << endl;
+
+            // Copy the original and new domains and domain difference...
+            // gimpl_targ_buf.original_domain[port_name] = cpy(buf_domain);
+            // gimpl_targ_buf.new_domain[port_name] = cpy(new_domain);
+            // gimpl_targ_buf.domain_difference[port_name] = cpy(diff_domains);
 
           }
 
@@ -3328,10 +3359,23 @@ CoreIR::Module*  generate_coreir_without_ctrl(CodegenOptions& options,
 
       cout << "AFTER GARNET LOWERING" << endl;
 
+
+
+      cout << "TRY PRINTING IMPL DOMAIN DIFF... " << buf.first << endl;
+      for(auto l : impl.lowering_info) {
+        auto gimpl = l.second;
+        auto gimpl_targ_buf = gimpl.target_buf;
+        cout << "GIMPL: " << l.first << endl;
+        for(auto dd_it:gimpl_targ_buf.domain_difference){
+          cout << dd_it.first << " -> " << str(dd_it.second) << endl;
+        }
+      }
+
+      // assert(false);
+
       //Generate the memory module
       auto ub_mod = generate_coreir_without_ctrl(options, context, buf.second, impl, hwinfo);
       cout << "Printing UB MOD" << endl;
-      cout << ub_mod << endl;
       cout << ub_mod->toString() << endl;
       // cout << ub_mod->name << endl;
       // cout << *ub_mod << endl;

@@ -1206,17 +1206,22 @@ void UBufferImpl::merge_banks_and_rewrite(vector<int> & banks_tobe_merged, bool 
   cout << "PRINTING MERGE AND REWRITE TARGET BUFFER" << endl;
   for(auto it: target_buffers) {
     cout << it << endl;
+    cout << "NON SIMPLIFIED ACCESS MAP" << endl;
     for(auto it2 : it.access_map_non_simplified) {
       cout << it2.first << " : " << str(it2.second) << endl;
     }
+    cout << "ORIGINAL DOMAIN" << endl;
+    for(auto it2 : it.original_domain) {
+      cout << it2.first << " : " << str(it2.second) << endl;
+    }
   }
+  cout << "DONE PRINTING MERGE AND REWRITE TARGET BUFFER" << endl;
 
   //TODO check the other impl are the same
   GarnetImpl merged_impl;
   int bank_id_0 = pick(banks_tobe_merged);
   merged_impl = lowering_info.at(bank_id_0);
   merged_impl.sub_component.clear();
-
 
   std::set<string> merge_inpts, merge_outpts;
   for (int bank_id: banks_tobe_merged) {
@@ -1246,6 +1251,8 @@ void UBufferImpl::merge_banks_and_rewrite(vector<int> & banks_tobe_merged, bool 
   //Also merge target buffer
   merged_impl.target_buf = merge_buf_with_different_outpt(target_buffers, new_sram_name);
 
+  cout << "COPYING LOOP..." << endl;
+
   // Copy over from target buffers
   for(auto tb : target_buffers){
     for(auto it : tb.access_map_non_simplified) {
@@ -1266,13 +1273,37 @@ void UBufferImpl::merge_banks_and_rewrite(vector<int> & banks_tobe_merged, bool 
       }
 
       merged_impl.target_buf.access_map_non_simplified.insert({it.first, final_access_map});
+
+
+      // cout << "BEFORE!!!" << endl;
+      // for(auto it2_thru : tb.original_domain) {
+      //   cout << it2_thru.first << " : " << str(it2_thru.second) << endl;
+      // }
+      // cout << "AFTER!!!" << endl;
+
+      // // Copy over new_domain, original_domain, domain_diff
+      // merged_impl.target_buf.original_domain[it.first] = tb.original_domain.at(it.first);
+
+      // cout << "Got original domain" << endl;
+      // cout << str(tb.original_domain.at(it.first)) << endl;
+
+      // merged_impl.target_buf.new_domain[it.first] = tb.new_domain.at(it.first);
+
+      // cout << "Got new domain" << endl;
+      // cout << str(tb.new_domain.at(it.first)) << endl;
+
+      // merged_impl.target_buf.domain_difference[it.first] = tb.domain_difference.at(it.first);
+
+      // cout << "Got domain difference" << endl;
+      // cout << str(tb.domain_difference.at(it.first)) << endl;
     }
   }
 
   cout << "TARGET BUFFER AFTER MERGE" << endl;
   cout << merged_impl.target_buf << endl;
   for(auto it : merged_impl.target_buf.access_map_non_simplified) {
-    cout << it.first << " : " << endl << str(it.second) << endl;
+    cout << it.first << " amns: " << endl << str(it.second) << endl;
+    // cout << it.first << " dd: " << endl << str(merged_impl.target_buf.domain_difference.at(it.first)) << endl;
   }
 
   merged_impl.sub_component.insert({new_sram_name, sram_merged});
@@ -1908,6 +1939,7 @@ UBuffer UBuffer::generate_ubuffer(CodegenOptions& options, UBufferImpl& impl, sc
 //}
 
 void UBuffer::generate_coreir_without_ctrl(CodegenOptions& options, UBufferImpl& impl, CoreIR::ModuleDef* def, schedule_info & info) {
+  cout << "GENERATE COREIR WITHOUT CONTROL ALTER" << endl;
   generate_coreir_refactor(options, impl, def, info, false);
 }
 
@@ -2305,9 +2337,12 @@ void add_lake_config(Json& jdata, ConfigMap data, int dimensionality, string dom
     auto tmp = MemConnSch(dimensionality, data);
     tmp.remove_redundant_dim();
     jdata[domain_name]["dimensionality"] = tmp.dimensionality;
+    cout << "Printing dim data" << endl;
     for (auto it: tmp.vals) {
+      cout << it.first << " : " << it.second << tab(1) << domain_name << endl;
         jdata[domain_name][it.first] = it.second;
     }
+    // jdata[domain_name]["HELLO"] = "WORLD";
 }
 
 ConfigMap generate_addressor_config_from_access_map(umap* acc_map, LakeCollateral mem, bool is_read, bool tb_share = false) {
@@ -2373,7 +2408,7 @@ isl_map* add_config_with_dom_dim_merge(ConfigMap& config_info, isl_map* & opt_sc
 
 //Wide fetch width codegen
 Json UBuffer::generate_ubuf_args(CodegenOptions& options, map<string, UBuffer> & rewrite_buffer) {
-
+    cout << "THIS UBUF ARGS (1)" << endl;
     Json ret;
 
     /*build a map from OP schedule name to input access map, to output access map
@@ -2629,6 +2664,7 @@ Json UBuffer::generate_ubuf_args(CodegenOptions& options, map<string, UBuffer> &
           add_lake_config(ret, config_info, num_in_dims(aff), ctrl_name);
         }
     }
+    cout << "Printing returned json..." << endl;
     cout << ret << endl;
     return ret;
 }
@@ -2650,6 +2686,8 @@ pair<isl_map*, isl_map*> pad_domain( isl_map* sched, isl_map* acc) {
 Json UBuffer::generate_ubuf_args(CodegenOptions& options,
     UBuffer& ubuf, string mem_name) {
  Json ret;
+
+ cout << "THIS UBUF ARGS (2)" << endl;
 
  //Metadata
  auto mem = options.mem_hierarchy.at(mem_name);
@@ -3728,6 +3766,9 @@ void UBuffer::wire_ubuf_IO(CodegenOptions& options,CoreIR::ModuleDef* def, map<s
 
 //helper function to generate shift register
 void UBuffer::generate_sreg_and_wire(CodegenOptions& options, UBufferImpl& impl, CoreIR::ModuleDef* def, map<string, CoreIR::Wireable*> & pt2wire){
+
+  cout << "GENERATING SREG BEGIN" << endl;
+
   auto context = def->getContext();
   for (auto it: impl.get_shift_registered_ports()) {
     //add pt for it.first(an output port)
@@ -3837,7 +3878,116 @@ string UBuffer::determine_config_mode(CodegenOptions& options, UBuffer& target_b
   return config_mode;
 }
 
+Json UBuffer::add_rv_info_to_json(Json config_file, UBuffer& target_buf) {
+  cout << "Adding rv info to json for buffer " << target_buf.name << endl;
+  // config_file["rv"] = "GOTIT";
+
+  // Emit the original domain, new domain, domain difference,
+  // unvectorized access map, dep values
+  // original domain
+  for(auto it: target_buf.original_domain) {
+
+    auto extents_dom = extents(it.second);
+    config_file["original_domain"][it.first]["extents"] = {};
+    auto num_dims_aff = ::num_dims(it.second);
+    cout << "NUM DIMS!" << endl;
+    config_file["original_domain"][it.first]["dimensionality"] = {num_dims_aff - 1};
+    for(int i = 0; i < num_dims_aff - 1; i++){
+      int idx = num_dims_aff - 1 - i;
+      config_file["original_domain"][it.first]["extents"].push_back(extents_dom.at(idx));
+    }
+
+  }
+
+  // Normal domain...
+  for(auto it: target_buf.domain) {
+    auto extents_dom = extents(it.second);
+    config_file["domain"][it.first]["extents"] = {};
+    auto num_dims_aff = ::num_dims(it.second);
+    config_file["domain"][it.first]["dimensionality"] = {num_dims_aff - 1};
+    for(int i = 0; i < num_dims_aff - 1; i++){
+      int idx = num_dims_aff - 1 - i;
+      config_file["domain"][it.first]["extents"].push_back(extents_dom.at(idx));
+    }
+  }
+
+  // New domain...
+  for(auto it: target_buf.new_domain) {
+    auto extents_dom = extents(it.second);
+    config_file["new_domain"][it.first]["extents"] = {};
+    auto num_dims_aff = ::num_dims(it.second);
+    config_file["new_domain"][it.first]["dimensionality"] = {num_dims_aff - 1};
+    for(int i = 0; i < num_dims_aff - 1; i++){
+      int idx = num_dims_aff - 1 - i;
+      config_file["new_domain"][it.first]["extents"].push_back(extents_dom.at(idx));
+    }
+  }
+
+  for(auto it: target_buf.domain_difference) {
+    cout << "PRINTING DOMAIN DIFFERENCE: " << it.first << " : " << str(it.second) << endl;
+    auto extents_dom = extents(it.second);
+    auto extents_mins = mins(it.second);
+    auto extents_maxs = maxs(it.second);
+    config_file["domain_diff"][it.first]["extents"] = {};
+    config_file["domain_diff"][it.first]["actual_range"] = {};
+    // config_file["domain_diff"][it.first]["maxs"] = {};
+    auto num_dims_aff = ::num_dims(it.second);
+    config_file["domain_diff"][it.first]["dimensionality"] = {num_dims_aff - 1};
+    for(int i = 0; i < num_dims_aff - 1; i++){
+      int idx = num_dims_aff - 1 - i;
+      config_file["domain_diff"][it.first]["extents"].push_back(extents_dom.at(idx));
+      config_file["domain_diff"][it.first]["actual_range"].push_back({extents_mins.at(idx), extents_maxs.at(idx)});
+      // config_file["domain_diff"][it.first]["maxs"].push_back(extents_maxs.at(idx));
+    }
+  }
+
+  // unvectorized access map
+  for(auto it: target_buf.access_map) {
+    auto buff_domain = target_buf.domain.at(it.first);
+    auto num_dims_aff = ::num_dims(buff_domain) - 1;
+    auto buf_access_aff = ::get_aff(it.second);
+    config_file["access_map"][it.first]["dimensionality"] = {num_dims_aff};
+    config_file["access_map"][it.first]["address_stride"] = {};
+    config_file["access_map"][it.first]["address_offset"] = {int_const_coeff(buf_access_aff)};
+    for(int i = 0; i < num_dims_aff; i++){
+      int idx = num_dims_aff - i;
+      config_file["access_map"][it.first]["address_stride"].push_back(int_coeff(buf_access_aff, idx));
+    }
+  }
+
+  // for(auto it: target_buf.access_map_non_simplified) {
+  //   // config_file["access_map"][it.first] = str(it.second);
+  //   auto buff_domain = target_buf.domain.at(it.first);
+  //   auto num_dims_aff = ::num_dims(buff_domain) - 1;
+  //   auto buf_access_aff = ::get_aff(it.second);
+  //   config_file["access_map_ns"][it.first]["dimensionality"] = {num_dims_aff};
+  //   config_file["access_map_ns"][it.first]["address_stride"] = {};
+  //   config_file["access_map_ns"][it.first]["address_offset"] = {int_const_coeff(buf_access_aff)};
+  //   for(int i = 0; i < num_dims_aff; i++){
+  //     // int idx = num_dims_aff - i;
+  //     int idx = i;
+  //     config_file["access_map_ns"][it.first]["address_stride"].push_back(int_coeff(buf_access_aff, idx));
+  //   }
+  // }
+
+  // dep values
+  for(auto it: target_buf.dependencies) {
+    auto p0 = it.first.first;
+    auto p1 = it.first.second;
+    auto dep_name = p0 + "___DEPTO___" + p1;
+    auto dep_vec = it.second;
+    config_file["dep_values"][dep_name] = {};
+    for(auto vec_elem: dep_vec){
+      config_file["dep_values"][dep_name].push_back(vec_elem);
+    }
+  }
+
+  return config_file;
+}
+
+
 CoreIR::Instance* UBuffer::map_ubuffer_to_cgra(CodegenOptions& options, CoreIR::ModuleDef* def, GarnetImpl& hw_impl) {
+  cout << "MAP BUFFER TO CGRA: " << hw_impl.target_buf.name << endl;
   UBuffer target_buf = hw_impl.target_buf;
   string ub_ins_name = "ub_" + target_buf.name;
   CoreIR::Instance* buf;
@@ -3848,7 +3998,15 @@ CoreIR::Instance* UBuffer::map_ubuffer_to_cgra(CodegenOptions& options, CoreIR::
     //}
     //TODO generate the config file on the fly
     assert(hw_impl.sub_component.size());
+    cout << "Generate lake tile instance...bef" << endl;
+    auto tb = hw_impl.target_buf;
+    for(auto it: tb.domain_difference){
+      cout << "PRINTING DOMAIN DIFF: " << it.first << " : " << str(it.second) << endl;
+    }
     config_file = generate_ubuf_args(options, hw_impl.sub_component);
+    cout << "Add rv information to buffer..." << endl;
+    config_file = add_rv_info_to_json(config_file, hw_impl.target_buf);
+    cout << "Generate lake tile instance...af" << endl;
     buf = generate_lake_tile_instance(def, options,
       ub_ins_name, "lake",
       target_buf.num_in_ports(),
@@ -4582,6 +4740,9 @@ void UBuffer::generate_coreir_refactor(CodegenOptions& options,
         CoreIR::ModuleDef* def,
         schedule_info& info, //TODO:remove this
         bool with_ctrl) {
+
+  cout << "generate_coreir_refactor MEK" << endl;
+
   auto context = def->getContext();
   map<string, CoreIR::Wireable*> pt2wire;
 
@@ -4610,8 +4771,17 @@ void UBuffer::generate_coreir_refactor(CodegenOptions& options,
   //Go through the banks and generate connection and config
   for (auto it: impl.bank_rddom) {
     auto bank_id = it.first;
-    auto target_buf_impl = impl.lowering_info.at(bank_id);
 
+    cout << "PRINTING DOMAIN DIFF - NEED TO COPY TO LOWERED???" << endl;
+
+    auto target_buf_impl = impl.lowering_info.at(bank_id);
+    for(auto domain_diff_it : target_buf_impl.target_buf.domain_difference){
+
+      cout << "DOMAIN DIFF AT " << domain_diff_it.first << endl;
+      cout << str(domain_diff_it.second) << endl;
+    }
+
+    // assert(false);
 
     CoreIR::Instance* buf = map_ubuffer_to_cgra(options, def, target_buf_impl);
     insert_accumulation_register_with_existing_buf(
@@ -4632,6 +4802,7 @@ void UBuffer::generate_coreir_refactor(CodegenOptions& options,
   }
 
   //Generate the shift register connection
+  cout << "GENERATING SHIFT REGISTERS FOR IMPL" << endl;
   generate_sreg_and_wire(options, impl, def, pt2wire);
 
   generate_fanin_connection(options, impl, def, pt2wire, info);
@@ -5353,6 +5524,7 @@ void UBuffer::generate_coreir(CodegenOptions& options,
     if (false) {
       generate_synthesizable_functional_model(options, buf, def, hwinfo);
     } else {
+      cout << "CALLING GENERATECOREIRWITHOUTCTRL" << endl;
       buf.generate_coreir_without_ctrl(options, impl, def, hwinfo);
     }
     ub->setDef(def);

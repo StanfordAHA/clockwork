@@ -13400,6 +13400,7 @@ void generate_garnet_coreir(std::map<string, UBuffer> buffers_opt, prog prg, Cod
   cout << endl;
   cout << "generate_garnet_coreir: 2" << endl;
   if (use_metamapper) {
+    cout << "generate_garnet_coreir: 2.1" << endl;
     generate_coreir_without_ctrl(opt, buffers_opt, prg, sched, hwinfo, dse_compute_filename);
     cout << "generate_garnet_coreir: 3" << endl;
   } else {

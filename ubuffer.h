@@ -1087,6 +1087,11 @@ class UBuffer {
 
     std::map<string, umap*> access_map;
     std::map<string, umap*> access_map_non_simplified;
+
+    std::map<string, isl_set*> original_domain;
+    std::map<string, isl_set*> new_domain;
+    std::map<string, isl_set*> domain_difference;
+
     std::map<string, isl_union_map*> schedule;
     std::map<string, vector<string> > port_bundles;
 
@@ -1117,6 +1122,8 @@ class UBuffer {
         config_file = config;
     }
 #endif
+
+    Json add_rv_info_to_json(Json config_file, UBuffer& target_buf);
 
     vector<std::string> tokenize_string(std::string str, std::string delimiter) {
         std::vector<std::string> tokens;
