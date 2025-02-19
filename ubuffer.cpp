@@ -3771,6 +3771,11 @@ void UBuffer::generate_sreg_and_wire(CodegenOptions& options, UBufferImpl& impl,
 
   auto context = def->getContext();
   for (auto it: impl.get_shift_registered_ports()) {
+    cout << "SHIFT REG INFO" << endl;
+    cout << "dst: " << it.first << endl;
+    cout << "src: " << it.second.first << endl;
+    cout << "delay: " << it.second.second << endl;
+    cout << endl << endl;
     //add pt for it.first(an output port)
     string dst = it.first;
     string src = it.second.first;
@@ -3793,9 +3798,10 @@ void UBuffer::generate_sreg_and_wire(CodegenOptions& options, UBufferImpl& impl,
     //cout << *this << endl;
     CoreIR::Wireable* final_out = def->sel("self." + container_bundle(dst) + "." + str(bundle_offset(dst)));
     for (size_t i = 0; i < delay; i ++) {
-      auto reg = def->addInstance("d_reg_"+context->getUnique(), "mantle.reg",
+      auto reg = def->addInstance("mek_d_reg_NONEMPTYFIFO_"+context->getUnique(), "mantle.reg",
           {{"width", CoreIR::Const::make(context, port_widths)},
-          {"has_en", CoreIR::Const::make(context, false)}});
+           {"has_en", CoreIR::Const::make(context, false)}});
+           //  {"is_stencil_fifo", CoreIR::Const::make(context, true)}});
       def->connect(reg->sel("in"), last_out);
       last_out = reg->sel("out");
     }
@@ -3882,15 +3888,122 @@ Json UBuffer::add_rv_info_to_json(Json config_file, UBuffer& target_buf) {
   cout << "Adding rv info to json for buffer " << target_buf.name << endl;
   // config_file["rv"] = "GOTIT";
 
+  // For this buffer we can understand how much data needs to be emitted from the front
+  // First we go through eachoutput port and find the precursor data by looking at the domain difference
+  auto output_ports = target_buf.get_out_ports();
+
+  map<int, int> precursor_map = {};
+  map<int, int> num_data_precursor = {};
+
+  for(auto it : target_buf.domain_difference){
+    cout << "This is an output port... " << it.first << endl;
+    auto domain_diff = target_buf.domain_difference.at(it.first);
+    cout << "Domain difference: " << str(domain_diff) << endl;
+
+    auto dom_points = get_points(domain_diff);
+    for(auto dom_pt:dom_points){
+      cout << "Domain point: " << str(dom_pt) << endl;
+    }
+    // auto union_everything = unn(domain_diff);
+    // cout << "Domain difference after: " << str(union_everything) << endl;
+
+    auto extents_original_dom = extents(target_buf.new_domain.at(it.first));
+    // auto extents_original_dom = extents(target_buf.domain.at(it.first));
+
+    auto extents_dom = extents(it.second);
+    auto extents_mins = mins(it.second);
+    auto extents_maxs = maxs(it.second);
+    auto num_dims_aff = ::num_dims(it.second) - 1;
+    // Check at each dimension (outside to inside)
+    for(int i = num_dims_aff - 1; i >= 0; i--){
+      int idx = num_dims_aff - i;
+      cout << "Checking dimension: " << idx << endl;
+      cout << "Extents: " << extents_dom.at(idx) << endl;
+      cout << "Mins: " << extents_mins.at(idx) << endl;
+      cout << "Maxs: " << extents_maxs.at(idx) << endl;
+
+      // If we start from the beginning of the domain, check the extent and put it in there
+      // and calculate how much data that is...
+      if((extents_mins.at(idx) == 0) && (extents_dom.at(idx) != extents_original_dom.at(idx))){
+        // precursor_vec.push_back(abs(extents_mins.at(idx)));
+        // Now figure out how much data that is by getting the product of all inner loops...
+        // int tmp_num_data_precursor = extents_dom.at(idx);;
+        int tmp_num_data_precursor = 1;
+        for(int j = 0; j < i; j++){
+          int calc_idx = num_dims_aff - j;
+          tmp_num_data_precursor *= extents_dom.at(calc_idx);
+        }
+        cout << "Found precursor on port: " << it.first << " with precursor of size : " << extents_dom.at(idx) << " on level " << i << " and num_data_precursor: " << num_data_precursor << endl;
+        // If key is not in map, let's add it
+        if(precursor_map.find(i) == precursor_map.end()){
+          cout << "Wasn't in the map yet..." << endl;
+          precursor_map[i] = extents_dom.at(idx);
+          num_data_precursor[i] = tmp_num_data_precursor;
+        } else if(tmp_num_data_precursor > num_data_precursor[i]){
+          cout << "Bigger precursor than current one..." << endl;
+          precursor_map[i] = extents_dom.at(idx);
+          num_data_precursor[i] = tmp_num_data_precursor;
+        }
+        else{
+          cout << "Was in the map but not bigger than the current one..." << endl;
+        }
+      }
+    }
+
+  }
+
+  cout << "Printing collected info..." << endl;
+  cout << "Precursor map: " << endl;
+  for(auto it: precursor_map){
+    cout << it.first << " : " << it.second << endl;
+  }
+  cout << "Num data precursor: " << endl;
+  for(auto it: num_data_precursor){
+    cout << it.first << " : " << it.second << endl;
+  }
+
+  // Verify that we can program the other ports to output extra data by verifying their
+  // specific programming will do so...
+  for(auto output_port : target_buf.get_out_ports()){
+    cout << "Checking output port: " << output_port << endl;
+    // Get the domain and go through it and check that all lower levels make up the same amount of data...
+    auto extents_original_dom = extents(target_buf.domain.at(output_port));
+    auto num_dims_aff = ::num_dims(target_buf.domain.at(output_port)) - 1;
+    for(auto precursor_delta: precursor_map){
+
+      cout << "Checking level " << precursor_delta.first << " with precursor of size: " << precursor_delta.second << endl;
+      cout << "The number of data covered by lower levels should be " << num_data_precursor.at(precursor_delta.first) << endl;
+
+
+      int tmp_num_data_precursor = 1;
+      for(int j = 0; j < precursor_delta.first; j++){
+        int calc_idx = num_dims_aff - j;
+        tmp_num_data_precursor *= extents_original_dom.at(calc_idx);
+      }
+
+      cout << "Got this much data at lower levels: " << tmp_num_data_precursor << endl;
+
+      if(tmp_num_data_precursor != num_data_precursor.at(precursor_delta.first)){
+        cout << "ERROR: The number of data covered by lower levels is not the same as the precursor size..." << endl;
+        assert(false);
+      }
+
+    }
+  }
+
+  // Okay so this works...now we need to decide how to configure the thing...
+  // calculate additional offset in each direction...
+
+  assert(false);
+
   // Emit the original domain, new domain, domain difference,
   // unvectorized access map, dep values
   // original domain
   for(auto it: target_buf.original_domain) {
 
     auto extents_dom = extents(it.second);
-    config_file["original_domain"][it.first]["extents"] = {};
     auto num_dims_aff = ::num_dims(it.second);
-    cout << "NUM DIMS!" << endl;
+    config_file["original_domain"][it.first]["extents"] = {};
     config_file["original_domain"][it.first]["dimensionality"] = {num_dims_aff - 1};
     for(int i = 0; i < num_dims_aff - 1; i++){
       int idx = num_dims_aff - 1 - i;
@@ -4002,6 +4115,7 @@ CoreIR::Instance* UBuffer::map_ubuffer_to_cgra(CodegenOptions& options, CoreIR::
     auto tb = hw_impl.target_buf;
     for(auto it: tb.domain_difference){
       cout << "PRINTING DOMAIN DIFF: " << it.first << " : " << str(it.second) << endl;
+      cout << "NUM OUTPUT PORTS : " << tb.num_out_ports() << endl;
     }
     config_file = generate_ubuf_args(options, hw_impl.sub_component);
     cout << "Add rv information to buffer..." << endl;
