@@ -3895,21 +3895,17 @@ Json UBuffer::add_rv_info_to_json(Json config_file, UBuffer& target_buf) {
   map<int, int> precursor_map = {};
   map<int, int> num_data_precursor = {};
 
+  // Map the ports to how much precursor they already have in each direction
+  map<string, vector<pair<int, int>>> precursor_local = {};
+  map<string, vector<pair<int, int>>> precursor_extra = {};
+
   for(auto it : target_buf.domain_difference){
     cout << "This is an output port... " << it.first << endl;
     auto domain_diff = target_buf.domain_difference.at(it.first);
     cout << "Domain difference: " << str(domain_diff) << endl;
 
     auto dom_points = get_points(domain_diff);
-    // for(auto dom_pt:dom_points){
-    //   cout << "Domain point: " << str(dom_pt) << endl;
-    // }
-
     auto dom_points_original = get_points(target_buf.original_domain_projected.at(it.first));
-    // for(auto dom_pt:dom_points_original){
-    //   cout << "Domain point (original): " << str(dom_pt) << endl;
-    // }
-
     auto extents_original_dom = extents(target_buf.new_domain.at(it.first));
     // auto extents_original_dom = extents(target_buf.domain.at(it.first));
 
@@ -3928,7 +3924,6 @@ Json UBuffer::add_rv_info_to_json(Json config_file, UBuffer& target_buf) {
         filtered_points.push_back(dom_pt);
       }
     }
-
     cout << "Filtered points: " << endl;
     for(auto dom_pt:filtered_points){
       cout << "Filtered domain point: " << str(dom_pt) << endl;
@@ -4020,21 +4015,11 @@ Json UBuffer::add_rv_info_to_json(Json config_file, UBuffer& target_buf) {
         // If there is no fail at this point, then we know we can say the precursor is the delta of the cooridnate and 0 *
         // the number of data emmitted within the subspace
         if(!any_fail){
-          // precursor_vec.push_back(curr_coord * subspace_points.size());
           int num_data_emitted = 1;
           for(int z_ = 0; z_ < dim_; z_++){
             num_data_emitted *= extents_dom.at(num_dims_aff - z_);
           }
           cout << "Found a precursor: " << curr_coord << " at dimension: " << dim_ << " with size: " << num_data_emitted << endl;
-          // if(precursor_map.find(dim_) == precursor_map.end()){
-          //   precursor_map[dim_] = curr_coord;
-          //   num_data_precursor[dim_] = num_data_emitted;
-          // } else {
-          //   if(precursor_map[dim_] < curr_coord){
-          //     precursor_map[dim_] = curr_coord;
-          //     num_data_precursor[dim_] = num_data_emitted;
-          //   }
-          // }
 
           if(precursor_map.find(dim_) == precursor_map.end()){
             cout << "Wasn't in the map yet..." << endl;
@@ -4049,7 +4034,11 @@ Json UBuffer::add_rv_info_to_json(Json config_file, UBuffer& target_buf) {
             cout << "Was in the map but not bigger than the current one..." << endl;
           }
 
-
+          // Store the information anyway in the local...
+          if(precursor_local.find(it.first) == precursor_local.end()){
+            precursor_local[it.first] = {};
+          }
+          precursor_local.at(it.first).push_back({dim_, curr_coord});
         }
         else{
           cout << "FAILED..." << endl;
@@ -4059,6 +4048,11 @@ Json UBuffer::add_rv_info_to_json(Json config_file, UBuffer& target_buf) {
       }
       else {
         cout << "Not checking the coordinate...no precursor in this direction" << endl;
+        // Store the information anyway in the local...
+        if(precursor_local.find(it.first) == precursor_local.end()){
+          precursor_local[it.first] = {};
+        }
+        precursor_local.at(it.first).push_back({dim_, 0});
       }
     }
 
@@ -4085,14 +4079,11 @@ Json UBuffer::add_rv_info_to_json(Json config_file, UBuffer& target_buf) {
 
       cout << "Checking level " << precursor_delta.first << " with precursor of size: " << precursor_delta.second << endl;
       cout << "The number of data covered by lower levels should be " << num_data_precursor.at(precursor_delta.first) << endl;
-
-
       int tmp_num_data_precursor = 1;
       for(int j = 0; j < precursor_delta.first; j++){
         int calc_idx = num_dims_aff - j;
         tmp_num_data_precursor *= extents_original_dom.at(calc_idx);
       }
-
       cout << "Got this much data at lower levels: " << tmp_num_data_precursor << endl;
 
       if(tmp_num_data_precursor != num_data_precursor.at(precursor_delta.first)){
@@ -4103,11 +4094,69 @@ Json UBuffer::add_rv_info_to_json(Json config_file, UBuffer& target_buf) {
     }
   }
 
-  cout << "DYING ON PURPOSE..." << endl;
-  assert(false);
+  for(auto it: precursor_local){
+    cout << "Output port: " << it.first << " has local precursors: " << endl;
+    for(auto loc_it: it.second){
+      cout << "Dimension: " << loc_it.first << " with delta: " << loc_it.second << endl;
+    }
+  }
 
   // Okay so this works...now we need to decide how to configure the thing...
   // calculate additional offset in each direction...
+  for(auto it: precursor_local){
+    // Go through the local precursor and calculate the idfference from the precursor_map and store in precursor_extra
+    string output_port = it.first;
+    cout << "Output port: " << output_port << endl;
+    for(auto loc_it: it.second){
+      int dim_use = loc_it.first;
+      int delta = loc_it.second;
+      cout << "Dimension: " << dim_use << " with local delta: " << delta << endl;
+
+      int biggest_precursor = 0;
+      // Check if the precursor even exists in here
+      if(precursor_map.find(dim_use) != precursor_map.end()){
+        biggest_precursor = precursor_map.at(dim_use);
+      }
+      else{
+        cout << "The current dimension doesn't even have a precursor..." << endl;
+        assert(delta == 0);
+      }
+      cout << "Biggest precursor: " << biggest_precursor << endl;
+      auto extra_precursor = biggest_precursor - delta;
+
+      cout << "Needs extra precursor of size: " << extra_precursor << endl;
+      if(precursor_extra.find(output_port) == precursor_extra.end()){
+        precursor_extra[output_port] = {};
+      }
+      precursor_extra.at(output_port).push_back({dim_use, extra_precursor});
+    }
+  }
+
+  for(auto it: precursor_local){
+    cout << "Output port: " << it.first << " has local precursors: " << endl;
+    for(auto loc_it: it.second){
+      cout << "Dimension: " << loc_it.first << " with delta: " << loc_it.second << endl;
+    }
+  }
+  for(auto it: precursor_extra){
+    cout << "Output port: " << it.first << " needs additional precursors: " << endl;
+    for(auto loc_it: it.second){
+      cout << "Dimension: " << loc_it.first << " with delta: " << loc_it.second << endl;
+    }
+  }
+
+  // cout << "DYING ON PURPOSE..." << endl;
+  // assert(false);
+
+  // Emit extra precursor map
+  for(auto it: precursor_extra){
+    config_file["precursor_deltas"][it.first] = {};
+    cout << "Output port: " << it.first << " has extra precursors: " << endl;
+    for(auto loc_it: it.second){
+      cout << "Dimension: " << loc_it.first << " with delta: " << loc_it.second << endl;
+      config_file["precursor_deltas"][it.first].push_back({loc_it.first, loc_it.second});
+    }
+  }
 
   // Emit the original domain, new domain, domain difference,
   // unvectorized access map, dep values
@@ -4180,21 +4229,6 @@ Json UBuffer::add_rv_info_to_json(Json config_file, UBuffer& target_buf) {
       config_file["access_map"][it.first]["address_stride"].push_back(int_coeff(buf_access_aff, idx));
     }
   }
-
-  // for(auto it: target_buf.access_map_non_simplified) {
-  //   // config_file["access_map"][it.first] = str(it.second);
-  //   auto buff_domain = target_buf.domain.at(it.first);
-  //   auto num_dims_aff = ::num_dims(buff_domain) - 1;
-  //   auto buf_access_aff = ::get_aff(it.second);
-  //   config_file["access_map_ns"][it.first]["dimensionality"] = {num_dims_aff};
-  //   config_file["access_map_ns"][it.first]["address_stride"] = {};
-  //   config_file["access_map_ns"][it.first]["address_offset"] = {int_const_coeff(buf_access_aff)};
-  //   for(int i = 0; i < num_dims_aff; i++){
-  //     // int idx = num_dims_aff - i;
-  //     int idx = i;
-  //     config_file["access_map_ns"][it.first]["address_stride"].push_back(int_coeff(buf_access_aff, idx));
-  //   }
-  // }
 
   // dep values
   for(auto it: target_buf.dependencies) {
