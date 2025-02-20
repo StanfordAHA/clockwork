@@ -4062,42 +4062,6 @@ Json UBuffer::add_rv_info_to_json(Json config_file, UBuffer& target_buf) {
       }
     }
 
-    // Check at each dimension (outside to inside)
-    // for(int i = num_dims_aff - 1; i >= 0; i--){
-    //   int idx = num_dims_aff - i;
-    //   cout << "Checking dimension: " << idx << endl;
-    //   cout << "Extents: " << extents_dom.at(idx) << endl;
-    //   cout << "Mins: " << extents_mins.at(idx) << endl;
-    //   cout << "Maxs: " << extents_maxs.at(idx) << endl;
-
-    //   // If we start from the beginning of the domain, check the extent and put it in there
-    //   // and calculate how much data that is...
-    //   if((extents_mins.at(idx) == 0) && (extents_dom.at(idx) != extents_original_dom.at(idx))){
-    //     // precursor_vec.push_back(abs(extents_mins.at(idx)));
-    //     // Now figure out how much data that is by getting the product of all inner loops...
-    //     // int tmp_num_data_precursor = extents_dom.at(idx);;
-    //     int tmp_num_data_precursor = 1;
-    //     for(int j = 0; j < i; j++){
-    //       int calc_idx = num_dims_aff - j;
-    //       tmp_num_data_precursor *= extents_dom.at(calc_idx);
-    //     }
-    //     cout << "Found precursor on port: " << it.first << " with precursor of size : " << extents_dom.at(idx) << " on level " << i << " and num_data_precursor: " << num_data_precursor << endl;
-    //     // If key is not in map, let's add it
-    //     if(precursor_map.find(i) == precursor_map.end()){
-    //       cout << "Wasn't in the map yet..." << endl;
-    //       precursor_map[i] = extents_dom.at(idx);
-    //       num_data_precursor[i] = tmp_num_data_precursor;
-    //     } else if(tmp_num_data_precursor > num_data_precursor[i]){
-    //       cout << "Bigger precursor than current one..." << endl;
-    //       precursor_map[i] = extents_dom.at(idx);
-    //       num_data_precursor[i] = tmp_num_data_precursor;
-    //     }
-    //     else{
-    //       cout << "Was in the map but not bigger than the current one..." << endl;
-    //     }
-    //   }
-    // }
-
   }
 
   cout << "Printing collected info..." << endl;
