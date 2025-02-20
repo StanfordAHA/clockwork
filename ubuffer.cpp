@@ -3901,11 +3901,14 @@ Json UBuffer::add_rv_info_to_json(Json config_file, UBuffer& target_buf) {
     cout << "Domain difference: " << str(domain_diff) << endl;
 
     auto dom_points = get_points(domain_diff);
-    for(auto dom_pt:dom_points){
-      cout << "Domain point: " << str(dom_pt) << endl;
-    }
-    // auto union_everything = unn(domain_diff);
-    // cout << "Domain difference after: " << str(union_everything) << endl;
+    // for(auto dom_pt:dom_points){
+    //   cout << "Domain point: " << str(dom_pt) << endl;
+    // }
+
+    auto dom_points_original = get_points(target_buf.original_domain_projected.at(it.first));
+    // for(auto dom_pt:dom_points_original){
+    //   cout << "Domain point (original): " << str(dom_pt) << endl;
+    // }
 
     auto extents_original_dom = extents(target_buf.new_domain.at(it.first));
     // auto extents_original_dom = extents(target_buf.domain.at(it.first));
@@ -3914,6 +3917,76 @@ Json UBuffer::add_rv_info_to_json(Json config_file, UBuffer& target_buf) {
     auto extents_mins = mins(it.second);
     auto extents_maxs = maxs(it.second);
     auto num_dims_aff = ::num_dims(it.second) - 1;
+
+    auto first_point_original_domain = dom_points_original.at(0);
+
+    vector<isl_point *> filtered_points = {};
+    vector<isl_set *> filtered_points_set = {};
+
+    for(auto dom_pt:dom_points){
+      if(lex_lt_pt(dom_pt, first_point_original_domain)){
+        filtered_points.push_back(dom_pt);
+      }
+    }
+
+    cout << "Filtered points: " << endl;
+    for(auto dom_pt:filtered_points){
+      cout << "Filtered domain point: " << str(dom_pt) << endl;
+      filtered_points_set.push_back(to_set(dom_pt));
+    }
+
+    // TODO: Sort filtered points...
+
+    // Now check the difference w.r.t the first point in the domain... in each dimension
+    auto num_dims_aff = ::num_dims(it.second) - 1;
+    for(int dim_ = num_dims_aff - 1; dim_ >= 0; dim_--){
+      // If the coordinate of the first point
+      int coord_idx = num_dims_aff - dim_;
+      int curr_coord = to_int(coord(coord_idx));
+      cout << "Current coord at position " << dim_ << " is: " << curr_coord << endl;
+      // If coordinate is not 0, iterate through up until this point and check that
+      if(curr_coord > 0){
+
+        for(int sub_dim_ = 0; sub_dim_ < curr_coord; sub_dim_++){
+          // int curr_sub_coord = to_int(coord(coord_idx));
+          // cout << "Current sub coord at position " << dim_ << " is: " << curr_coord << endl;
+          // Create a vector of iterators below the current level, iterate over them, check that each of those points
+          // is in the domain
+          vector<int> iterators_lcl = {}
+          vector<int> extents_lcl = {}
+          for(int z_ = 0; z_ < dim_; z_++){
+            iterators.push_back(0);
+            extents_lcl.push_back(extents_dom.at(num_dims_aff - z_));
+          }
+
+          // Generate all points in the subspace
+          std::vector<int> subspace_points = {};
+          bool done_adding_points = false;
+          if(iterators_lcl.size() == 0){
+            done_adding_points = true;
+          }
+          while(!done_adding_points){
+            // Assume all extents are at least 1
+            // add point, then step the looping iterators, check if done
+            vector<int> new_pt = {};
+            for(int pt_idx = 0; pt_idx < extents_lcl.size(); pt_idx++){
+              new_pt.push_back(iterators_lcl.at(pt_idx));
+            }
+            new_pt.push_back(sub_dim_);
+
+            subspace_points.push_back(new_pt)
+          }
+
+        }
+
+
+
+      }
+      else {
+        cout << "Not checking the coordinate...no precursor in this direction" << endl;
+      }
+    }
+
     // Check at each dimension (outside to inside)
     for(int i = num_dims_aff - 1; i >= 0; i--){
       int idx = num_dims_aff - i;

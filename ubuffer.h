@@ -1089,6 +1089,7 @@ class UBuffer {
     std::map<string, umap*> access_map_non_simplified;
 
     std::map<string, isl_set*> original_domain;
+    std::map<string, isl_set*> original_domain_projected;
     std::map<string, isl_set*> new_domain;
     std::map<string, isl_set*> domain_difference;
 

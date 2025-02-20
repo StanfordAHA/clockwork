@@ -2960,6 +2960,7 @@ CoreIR::Module*  generate_coreir_without_ctrl(CodegenOptions& options,
 
             // Need to do it without copying the object...
             impl.lowering_info.at(l.first).target_buf.original_domain[port_name] = cpy(buf_domain);
+            impl.lowering_info.at(l.first).target_buf.original_domain_projected[port_name] = to_set(cpy(domain_projected));
             impl.lowering_info.at(l.first).target_buf.new_domain[port_name] = cpy(new_domain);
             impl.lowering_info.at(l.first).target_buf.domain_difference[port_name] = to_set(cpy(diff_domains));
 
@@ -2999,6 +3000,7 @@ CoreIR::Module*  generate_coreir_without_ctrl(CodegenOptions& options,
             // gimpl_targ_buf.new_domain[port_name] = cpy(new_domain);
             // gimpl_targ_buf.domain_difference[port_name] = to_set(cpy(diff_domains));
             impl.lowering_info.at(l.first).target_buf.original_domain[port_name] = cpy(buf_domain);
+            impl.lowering_info.at(l.first).target_buf.original_domain_projected[port_name] = to_set(cpy(domain_projected));
             impl.lowering_info.at(l.first).target_buf.new_domain[port_name] = cpy(new_domain);
             impl.lowering_info.at(l.first).target_buf.domain_difference[port_name] = to_set(cpy(diff_domains));
 
