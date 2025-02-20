@@ -1124,6 +1124,31 @@ class UBuffer {
     }
 #endif
 
+    bool increment_for_loop(vector<int>* iterators, vector<int>* extents){
+      // increment the iterators of the for loop structure to the next point
+      // based on extents
+      bool ret_ = false;
+      //cout << "iterators: " << iterators << endl;
+      //cout << "extents: " << extents << endl;
+      for(int i = 0; i < iterators->size(); i++){
+        // Increment it
+        iterators->at(i) += 1;
+        // If it hit the end, set it back to 0
+        if(iterators->at(i) == extents->at(i)){
+          iterators->at(i) = 0;
+          // If this is the top iterator hitting the end, the increment is done
+          if(i == iterators->size() - 1){
+            ret_ = true;
+          }
+        }
+        // If not the end, the chain is broken and we can stop
+        else{
+          break;
+        }
+      }
+      return ret_;
+    }
+
     Json add_rv_info_to_json(Json config_file, UBuffer& target_buf);
 
     vector<std::string> tokenize_string(std::string str, std::string delimiter) {

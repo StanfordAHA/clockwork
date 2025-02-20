@@ -3938,29 +3938,37 @@ Json UBuffer::add_rv_info_to_json(Json config_file, UBuffer& target_buf) {
     // TODO: Sort filtered points...
 
     // Now check the difference w.r.t the first point in the domain... in each dimension
-    auto num_dims_aff = ::num_dims(it.second) - 1;
     for(int dim_ = num_dims_aff - 1; dim_ >= 0; dim_--){
+
+      int idx = num_dims_aff - dim_;
+      cout << "Checking dimension: " << idx << endl;
+      cout << "Extents: " << extents_dom.at(idx) << endl;
+      cout << "Mins: " << extents_mins.at(idx) << endl;
+      cout << "Maxs: " << extents_maxs.at(idx) << endl;
+
       // If the coordinate of the first point
       int coord_idx = num_dims_aff - dim_;
-      int curr_coord = to_int(coord(coord_idx));
+      int curr_coord = to_int(coord(first_point_original_domain, coord_idx));
       cout << "Current coord at position " << dim_ << " is: " << curr_coord << endl;
       // If coordinate is not 0, iterate through up until this point and check that
       if(curr_coord > 0){
+
+        bool any_fail = false;
 
         for(int sub_dim_ = 0; sub_dim_ < curr_coord; sub_dim_++){
           // int curr_sub_coord = to_int(coord(coord_idx));
           // cout << "Current sub coord at position " << dim_ << " is: " << curr_coord << endl;
           // Create a vector of iterators below the current level, iterate over them, check that each of those points
           // is in the domain
-          vector<int> iterators_lcl = {}
-          vector<int> extents_lcl = {}
+          vector<int> iterators_lcl = {};
+          vector<int> extents_lcl = {};
           for(int z_ = 0; z_ < dim_; z_++){
-            iterators.push_back(0);
+            iterators_lcl.push_back(0);
             extents_lcl.push_back(extents_dom.at(num_dims_aff - z_));
           }
 
           // Generate all points in the subspace
-          std::vector<int> subspace_points = {};
+          // std::vector<int> subspace_points = {};
           bool done_adding_points = false;
           if(iterators_lcl.size() == 0){
             done_adding_points = true;
@@ -3973,13 +3981,80 @@ Json UBuffer::add_rv_info_to_json(Json config_file, UBuffer& target_buf) {
               new_pt.push_back(iterators_lcl.at(pt_idx));
             }
             new_pt.push_back(sub_dim_);
+            std::reverse(new_pt.begin(), new_pt.end());
 
-            subspace_points.push_back(new_pt)
+            // Check if the point is in the filtered_points...
+            bool found_point = false;
+
+            for(auto filtered_pt : filtered_points){
+              vector<int> filtered_pt_coords = parse_pt(filtered_pt);
+              filtered_pt_coords.erase(filtered_pt_coords.begin());
+              // cout << "Comparing the new point: " << new_pt << " with: " << filtered_pt_coords << endl;
+              // Now compare against the new_pt
+              bool point_match = true;
+              for(int pt_idx = 0; pt_idx < filtered_pt_coords.size(); pt_idx++){
+                if(filtered_pt_coords.at(pt_idx) != new_pt.at(pt_idx)){
+                  point_match = false;
+                  // any_fail = true;
+                }
+              }
+              if(point_match){
+                found_point = true;
+                break;
+              }
+            }
+
+            // If we got through this and found_point is false, then any_fail is true because we couldn't verify that
+            // the entire precursor was there...
+            if(!found_point){
+              any_fail = true;
+            }
+
+            // }
+            // Step the iterators...
+            done_adding_points = increment_for_loop(&iterators_lcl, &extents_lcl);
           }
 
         }
 
+        // If there is no fail at this point, then we know we can say the precursor is the delta of the cooridnate and 0 *
+        // the number of data emmitted within the subspace
+        if(!any_fail){
+          // precursor_vec.push_back(curr_coord * subspace_points.size());
+          int num_data_emitted = 1;
+          for(int z_ = 0; z_ < dim_; z_++){
+            num_data_emitted *= extents_dom.at(num_dims_aff - z_);
+          }
+          cout << "Found a precursor: " << curr_coord << " at dimension: " << dim_ << " with size: " << num_data_emitted << endl;
+          // if(precursor_map.find(dim_) == precursor_map.end()){
+          //   precursor_map[dim_] = curr_coord;
+          //   num_data_precursor[dim_] = num_data_emitted;
+          // } else {
+          //   if(precursor_map[dim_] < curr_coord){
+          //     precursor_map[dim_] = curr_coord;
+          //     num_data_precursor[dim_] = num_data_emitted;
+          //   }
+          // }
 
+          if(precursor_map.find(dim_) == precursor_map.end()){
+            cout << "Wasn't in the map yet..." << endl;
+            precursor_map[dim_] = curr_coord;
+            num_data_precursor[dim_] = num_data_emitted;
+          } else if((num_data_emitted * curr_coord) > (num_data_precursor[dim_] * precursor_map[dim_])){
+            cout << "Bigger precursor than current one..." << endl;
+            precursor_map[dim_] = curr_coord;
+            num_data_precursor[dim_] = num_data_emitted;
+          }
+          else{
+            cout << "Was in the map but not bigger than the current one..." << endl;
+          }
+
+
+        }
+        else{
+          cout << "FAILED..." << endl;
+          assert(false);
+        }
 
       }
       else {
@@ -3988,40 +4063,40 @@ Json UBuffer::add_rv_info_to_json(Json config_file, UBuffer& target_buf) {
     }
 
     // Check at each dimension (outside to inside)
-    for(int i = num_dims_aff - 1; i >= 0; i--){
-      int idx = num_dims_aff - i;
-      cout << "Checking dimension: " << idx << endl;
-      cout << "Extents: " << extents_dom.at(idx) << endl;
-      cout << "Mins: " << extents_mins.at(idx) << endl;
-      cout << "Maxs: " << extents_maxs.at(idx) << endl;
+    // for(int i = num_dims_aff - 1; i >= 0; i--){
+    //   int idx = num_dims_aff - i;
+    //   cout << "Checking dimension: " << idx << endl;
+    //   cout << "Extents: " << extents_dom.at(idx) << endl;
+    //   cout << "Mins: " << extents_mins.at(idx) << endl;
+    //   cout << "Maxs: " << extents_maxs.at(idx) << endl;
 
-      // If we start from the beginning of the domain, check the extent and put it in there
-      // and calculate how much data that is...
-      if((extents_mins.at(idx) == 0) && (extents_dom.at(idx) != extents_original_dom.at(idx))){
-        // precursor_vec.push_back(abs(extents_mins.at(idx)));
-        // Now figure out how much data that is by getting the product of all inner loops...
-        // int tmp_num_data_precursor = extents_dom.at(idx);;
-        int tmp_num_data_precursor = 1;
-        for(int j = 0; j < i; j++){
-          int calc_idx = num_dims_aff - j;
-          tmp_num_data_precursor *= extents_dom.at(calc_idx);
-        }
-        cout << "Found precursor on port: " << it.first << " with precursor of size : " << extents_dom.at(idx) << " on level " << i << " and num_data_precursor: " << num_data_precursor << endl;
-        // If key is not in map, let's add it
-        if(precursor_map.find(i) == precursor_map.end()){
-          cout << "Wasn't in the map yet..." << endl;
-          precursor_map[i] = extents_dom.at(idx);
-          num_data_precursor[i] = tmp_num_data_precursor;
-        } else if(tmp_num_data_precursor > num_data_precursor[i]){
-          cout << "Bigger precursor than current one..." << endl;
-          precursor_map[i] = extents_dom.at(idx);
-          num_data_precursor[i] = tmp_num_data_precursor;
-        }
-        else{
-          cout << "Was in the map but not bigger than the current one..." << endl;
-        }
-      }
-    }
+    //   // If we start from the beginning of the domain, check the extent and put it in there
+    //   // and calculate how much data that is...
+    //   if((extents_mins.at(idx) == 0) && (extents_dom.at(idx) != extents_original_dom.at(idx))){
+    //     // precursor_vec.push_back(abs(extents_mins.at(idx)));
+    //     // Now figure out how much data that is by getting the product of all inner loops...
+    //     // int tmp_num_data_precursor = extents_dom.at(idx);;
+    //     int tmp_num_data_precursor = 1;
+    //     for(int j = 0; j < i; j++){
+    //       int calc_idx = num_dims_aff - j;
+    //       tmp_num_data_precursor *= extents_dom.at(calc_idx);
+    //     }
+    //     cout << "Found precursor on port: " << it.first << " with precursor of size : " << extents_dom.at(idx) << " on level " << i << " and num_data_precursor: " << num_data_precursor << endl;
+    //     // If key is not in map, let's add it
+    //     if(precursor_map.find(i) == precursor_map.end()){
+    //       cout << "Wasn't in the map yet..." << endl;
+    //       precursor_map[i] = extents_dom.at(idx);
+    //       num_data_precursor[i] = tmp_num_data_precursor;
+    //     } else if(tmp_num_data_precursor > num_data_precursor[i]){
+    //       cout << "Bigger precursor than current one..." << endl;
+    //       precursor_map[i] = extents_dom.at(idx);
+    //       num_data_precursor[i] = tmp_num_data_precursor;
+    //     }
+    //     else{
+    //       cout << "Was in the map but not bigger than the current one..." << endl;
+    //     }
+    //   }
+    // }
 
   }
 
@@ -4064,10 +4139,11 @@ Json UBuffer::add_rv_info_to_json(Json config_file, UBuffer& target_buf) {
     }
   }
 
+  cout << "DYING ON PURPOSE..." << endl;
+  assert(false);
+
   // Okay so this works...now we need to decide how to configure the thing...
   // calculate additional offset in each direction...
-
-  assert(false);
 
   // Emit the original domain, new domain, domain difference,
   // unvectorized access map, dep values
