@@ -3794,11 +3794,23 @@ void UBuffer::generate_sreg_and_wire(CodegenOptions& options, UBufferImpl& impl,
       last_out = pick(conns);
     }
     //CoreIR::Wireable* final_out = pt2wire.at(dst);
-
+    std::string final_out_name = "self." + container_bundle(dst) + "." + str(bundle_offset(dst));
+    cout << "Final out name... " << final_out_name << endl;
     //cout << *this << endl;
-    CoreIR::Wireable* final_out = def->sel("self." + container_bundle(dst) + "." + str(bundle_offset(dst)));
+    CoreIR::Wireable* final_out = def->sel(final_out_name);
+
     for (size_t i = 0; i < delay; i ++) {
-      auto reg = def->addInstance("mek_d_reg_NONEMPTYFIFO_"+context->getUnique(), "mantle.reg",
+
+      std::string prefix_ = "mek_d_reg_";
+      if(i == delay - 1){
+        prefix_ = "mek_d_reg_NONEMPTYFIFO_";
+      }
+
+      std::string suffix = context->getUnique();
+      auto full_name = prefix_ + suffix;
+      cout << "Map this port " << dst << " to " << full_name << endl;
+
+      auto reg = def->addInstance(full_name, "mantle.reg",
           {{"width", CoreIR::Const::make(context, port_widths)},
            {"has_en", CoreIR::Const::make(context, false)}});
            //  {"is_stencil_fifo", CoreIR::Const::make(context, true)}});

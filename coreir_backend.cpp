@@ -2911,8 +2911,10 @@ CoreIR::Module*  generate_coreir_without_ctrl(CodegenOptions& options,
             auto new_domain = gimpl_targ_buf.domain.at(port_name);
             // Get non-simplified...
             auto new_access_map = gimpl_targ_buf.access_map_non_simplified.at(port_name);
+            auto new_access_map_ns = gimpl_targ_buf.access_map.at(port_name);
             cout << "Domain: " << str(new_domain) << endl;
             cout << "Access Map: " << str(new_access_map) << endl;
+            cout << "Access Map NS: " << str(new_access_map_ns) << endl;
 
             normal_ports.push_back(port_name);
 
@@ -2924,6 +2926,9 @@ CoreIR::Module*  generate_coreir_without_ctrl(CodegenOptions& options,
               cout << "Converted map is null" << endl;
               assert(false);
             }
+            cout << "ADDING NEW NAME: " << buf.second.name << endl;
+            // Let's just convert the name to the range name of the currently implemented bank...
+            // auto new_access_map_range_name = range_name()
             auto renamed_access_map = set_range_name(converted_from_union_map_to_map, buf.second.name);
 
             auto convert_back_into_union_map = to_umap(renamed_access_map);
@@ -2931,6 +2936,9 @@ CoreIR::Module*  generate_coreir_without_ctrl(CodegenOptions& options,
               cout << "re-Converted map is null" << endl;
               assert(false);
             }
+
+            cout << "RECONVERT" << endl;
+            cout << str(convert_back_into_union_map) << endl;
 
             // (LOWERED) Showing deps for buffer: 2
             // hw_input_global_wrapper_stencil_op_hcompute_conv_stencil_10 -> hw_input_global_wrapper_stencil_op_hcompute_hw_input_global_wrapper_stencil_2 : {}
@@ -2962,7 +2970,14 @@ CoreIR::Module*  generate_coreir_without_ctrl(CodegenOptions& options,
             impl.lowering_info.at(l.first).target_buf.original_domain[port_name] = cpy(buf_domain);
             impl.lowering_info.at(l.first).target_buf.original_domain_projected[port_name] = to_set(cpy(domain_projected));
             impl.lowering_info.at(l.first).target_buf.new_domain[port_name] = cpy(new_domain);
-            impl.lowering_info.at(l.first).target_buf.domain_difference[port_name] = to_set(cpy(diff_domains));
+            // Check if empty...
+            auto ss = get_sets(diff_domains);
+            if(ss.size() == 0){
+              impl.lowering_info.at(l.first).target_buf.domain_difference[port_name] = nullptr;
+            }
+            else{
+              impl.lowering_info.at(l.first).target_buf.domain_difference[port_name] = to_set(cpy(diff_domains));
+            }
 
             // Save information for later...
             use_domains_save.insert({port_name, cpy(new_domain)});
@@ -3002,7 +3017,17 @@ CoreIR::Module*  generate_coreir_without_ctrl(CodegenOptions& options,
             impl.lowering_info.at(l.first).target_buf.original_domain[port_name] = cpy(buf_domain);
             impl.lowering_info.at(l.first).target_buf.original_domain_projected[port_name] = to_set(cpy(domain_projected));
             impl.lowering_info.at(l.first).target_buf.new_domain[port_name] = cpy(new_domain);
-            impl.lowering_info.at(l.first).target_buf.domain_difference[port_name] = to_set(cpy(diff_domains));
+
+
+            // Check if empty...
+            auto ss = get_sets(diff_domains);
+            if(ss.size() == 0){
+              impl.lowering_info.at(l.first).target_buf.domain_difference[port_name] = nullptr;
+            }
+            else{
+              impl.lowering_info.at(l.first).target_buf.domain_difference[port_name] = to_set(cpy(diff_domains));
+            }
+            // impl.lowering_info.at(l.first).target_buf.domain_difference[port_name] = to_set(cpy(diff_domains));
 
 
             // Save information for later...
