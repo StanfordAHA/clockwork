@@ -3777,7 +3777,13 @@ void UBuffer::generate_sreg_and_wire(CodegenOptions& options, UBufferImpl& impl,
 
   cout << "GENERATING SREG BEGIN" << endl;
 
+  map<string, vector<pair<string, pair<bool, string>>>> sreg_graph = {};
+  // map<string, string> map_to_points
+
   // map<string, map<string, string>> collect_port_mappings;
+  string previous_src = "";
+  string previous_dst = "";
+  string chain_port_use = "";
 
   auto context = def->getContext();
   for (auto it: impl.get_shift_registered_ports()) {
@@ -3789,6 +3795,15 @@ void UBuffer::generate_sreg_and_wire(CodegenOptions& options, UBufferImpl& impl,
     //add pt for it.first(an output port)
     string dst = it.first;
     string src = it.second.first;
+    // vector<pair<string, pair<bool, string>>> sreg_c;
+    bool new_chain = false;
+    // If the source was not the previous destination, start a new chain...
+    if (src != previous_dst){
+      new_chain = true;
+      chain_port_use = src;
+      sreg_graph[chain_port_use] = {};
+      sreg_graph[chain_port_use].push_back({collect_port_mappings[src]["reg_name"], {true, src}});
+    }
     int delay = it.second.second;
     auto wire = pt2wire.at(src);
     CoreIR::Wireable* last_out;
@@ -3826,15 +3841,13 @@ void UBuffer::generate_sreg_and_wire(CodegenOptions& options, UBufferImpl& impl,
       else{
         // If it is in the map, just copy it over
         collect_port_mappings[dst]["reg_name"] = collect_port_mappings[src]["reg_name"];
+        sreg_graph[chain_port_use].push_back({collect_port_mappings[dst]["reg_name"], {true, dst}});
       }
     }
 
     for (size_t i = 0; i < delay; i ++) {
 
       std::string prefix_ = "d_reg_";
-      // if(i == delay - 1){
-      //   prefix_ = "d_reg_NONEMPTYFIFO_";
-      // }
 
       std::string suffix = context->getUnique();
       auto full_name = prefix_ + suffix;
@@ -3843,6 +3856,11 @@ void UBuffer::generate_sreg_and_wire(CodegenOptions& options, UBufferImpl& impl,
       // The last iteration is the actual port we want...
       if(i == (delay - 1)){
         collect_port_mappings[dst]["reg_name"] = full_name;
+        sreg_graph[chain_port_use].push_back({full_name, {true, dst}});
+      }
+      else{
+        // If not at the end, push back false
+        sreg_graph[chain_port_use].push_back({full_name, {false, ""}});
       }
 
       auto reg = def->addInstance(full_name, "mantle.reg",
@@ -3853,6 +3871,8 @@ void UBuffer::generate_sreg_and_wire(CodegenOptions& options, UBufferImpl& impl,
       last_out = reg->sel("out");
     }
     def->connect(last_out, final_out);
+    previous_dst = dst;
+    previous_src = src;
   }
 
   // Print out the collect_port_mappings information...
@@ -3862,6 +3882,119 @@ void UBuffer::generate_sreg_and_wire(CodegenOptions& options, UBufferImpl& impl,
     cout << "op_port: " << it.second["op_port"] << endl;
     cout << "reg_name: " << it.second["reg_name"] << endl;
     cout << endl;
+  }
+
+  cout << "Print sreg graph..." << endl;
+  for (auto it : sreg_graph){
+    cout << "Chain port head: " << it.first << endl;
+    for (auto it2 : it.second){
+      cout << "Reg name: " << it2.first << " has port: " << it2.second.first << " with name: " << it2.second.second << endl;
+    }
+    cout << endl;
+  }
+
+  // Go through this sreg_graph, try putting as much data as early on as possible...
+  cout << "Navigate sreg graph..." << endl;
+  for (auto it : sreg_graph){
+    cout << "Chain port head: " << it.first << endl;
+    // for (auto it2 : it.second){
+    auto chain_vector = it.second;
+    for(int chain_pos = 0; chain_pos < it.second.size(); chain_pos++){
+      auto it2 = chain_vector.at(chain_pos);
+      cout << "Reg name: " << it2.first << " has port: " << it2.second.first << " with name: " << it2.second.second << endl;
+      auto reg_name = it2.first;
+      // If this is genuinely a shift register, we can try adding...
+      if(reg_name.find("d_reg") != std::string::npos){
+        // This is the case where we have a shift register...
+        // Try adding as much data as possible
+        int max_data_per_reg = 2;
+        // for(int num_data_to_add = max_data_per_reg; num_data_to_add > 0; num_data_to_add--){
+          // Collect all downstream ports and check how much they have left...
+        // cout << "TRYING TO ADD THIS MUCH DATA: " << num_data_to_add << endl;
+        vector<string> all_downstream_ports = {};
+        // Go through the rest of the chain and find all points that have a port...
+        for(int sub_chain_iter = chain_pos; sub_chain_iter < chain_vector.size(); sub_chain_iter++){
+          auto point__ = chain_vector.at(sub_chain_iter);
+          if(point__.second.first){
+            all_downstream_ports.push_back(point__.second.second);
+          }
+        }
+        cout << "PRINTING DOWNSTREAM PORTS" << endl;
+        for(auto it__ : all_downstream_ports){
+          cout << it__ << endl;
+        }
+
+        // Have downstream ports, check how much data left they each have...
+        int total_data_left = std::numeric_limits<int>::max();
+        // Only handling data at the lowest level
+        for(auto downstream_port : all_downstream_ports){
+          auto data_extra_vec = precursor_extra.at(downstream_port);
+          int data_extra_int = 0;
+          for(auto it__ : data_extra_vec){
+            if(it__.first == 0){
+              data_extra_int = it__.second;
+            }
+          }
+          auto data_committed_vec = precursor_committed.at(downstream_port);
+          int data_committed_int = 0;
+          for(auto it__ : data_committed_vec){
+            if(it__.first == 0){
+              data_committed_int = it__.second;
+            }
+          }
+          cout << "This has this much extra data: " << data_extra_int << " and this much committed data: " << data_committed_int << endl;
+          auto local_data_left = data_extra_int - data_committed_int;
+          cout << "Downstream port: " << downstream_port << " has data left: " << local_data_left << endl;
+          total_data_left = std::min(total_data_left, local_data_left);
+        }
+        int num_to_add = std::min(max_data_per_reg, total_data_left);
+        cout << "Can add this much data... " << num_to_add << endl;
+
+        // Now we know how much data to add to this reg, so we can subtract it from each...
+        for(auto downstream_port : all_downstream_ports){
+          for(int i_ = 0; i_ < precursor_committed[downstream_port].size(); i_++){
+            if(precursor_committed[downstream_port][i_].first == 0){
+              precursor_committed[downstream_port][i_].second += num_to_add;
+            }
+          }
+        }
+        extra_data_locations[reg_name] = num_to_add;
+
+        // }
+      }
+      else{
+        cout << "Can't add data to this location since it's not a shift register...: " << reg_name << endl;
+      }
+    }
+    cout << endl;
+  }
+
+  cout << "EXTRA DATA LOCATIONS" << endl;
+  for(auto it : extra_data_locations){
+    cout << "Reg name: " << it.first << " has extra data: " << it.second << endl;
+  }
+
+  for(auto it : precursor_extra){
+    auto port_name = it.first;
+    auto data_extra_vec = precursor_extra.at(port_name);
+    int data_extra_int = 0;
+    for(auto it__ : data_extra_vec){
+      if(it__.first == 0){
+        data_extra_int = it__.second;
+      }
+    }
+    auto data_committed_vec = precursor_committed.at(port_name);
+    int data_committed_int = 0;
+    for(auto it__ : data_committed_vec){
+      if(it__.first == 0){
+        data_committed_int = it__.second;
+      }
+    }
+    cout << "This port: " << port_name << " has this much extra data: " << data_extra_int << " and this much committed data: " << data_committed_int << endl;
+    auto local_data_left = data_extra_int - data_committed_int;
+    if(local_data_left != 0){
+      cout << "STILL NEEDS MORE DATA: " << local_data_left << endl;
+    }
   }
 
 }
@@ -3942,7 +4075,6 @@ string UBuffer::determine_config_mode(CodegenOptions& options, UBuffer& target_b
 }
 
 Json UBuffer::add_rv_info_to_json(Json config_file, UBuffer& target_buf) {
-// json UBuffer::add_rv_info_to_json(json config_file, UBuffer& target_buf) {
   cout << "Adding rv info to json for buffer " << target_buf.name << endl;
   // config_file["rv"] = "GOTIT";
 
@@ -3955,7 +4087,9 @@ Json UBuffer::add_rv_info_to_json(Json config_file, UBuffer& target_buf) {
 
   // Map the ports to how much precursor they already have in each direction
   map<string, vector<pair<int, int>>> precursor_local = {};
-  map<string, vector<pair<int, int>>> precursor_extra = {};
+  // map<string, vector<pair<int, int>>> precursor_extra = {};
+  precursor_extra = {};
+  precursor_committed = {};
 
   for(auto it : target_buf.domain_difference){
     cout << "This is an output port... " << it.first << endl;
@@ -3984,7 +4118,7 @@ Json UBuffer::add_rv_info_to_json(Json config_file, UBuffer& target_buf) {
     }
     cout << "Filtered points: " << endl;
     for(auto dom_pt:filtered_points){
-      cout << "Filtered domain point: " << str(dom_pt) << endl;
+      // cout << "Filtered domain point: " << str(dom_pt) << endl;
       filtered_points_set.push_back(to_set(dom_pt));
     }
 
@@ -4185,8 +4319,10 @@ Json UBuffer::add_rv_info_to_json(Json config_file, UBuffer& target_buf) {
       cout << "Needs extra precursor of size: " << extra_precursor << endl;
       if(precursor_extra.find(output_port) == precursor_extra.end()){
         precursor_extra[output_port] = {};
+        precursor_committed[output_port] = {};
       }
       precursor_extra.at(output_port).push_back({dim_use, extra_precursor});
+      precursor_committed.at(output_port).push_back({dim_use, 0});
     }
   }
 
@@ -4213,6 +4349,12 @@ Json UBuffer::add_rv_info_to_json(Json config_file, UBuffer& target_buf) {
     for(auto loc_it: it.second){
       cout << "Dimension: " << loc_it.first << " with delta: " << loc_it.second << endl;
       config_file["precursor_deltas"][it.first].push_back({loc_it.first, loc_it.second});
+    }
+  }
+  for(auto it: precursor_committed){
+    cout << "Output port: " << it.first << " has extra precursors: " << endl;
+    for(auto loc_it: it.second){
+      cout << "Dimension: " << loc_it.first << " with committed (should be 0): " << loc_it.second << endl;
     }
   }
 
