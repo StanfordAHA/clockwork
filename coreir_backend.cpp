@@ -2741,6 +2741,7 @@ CoreIR::Module*  generate_coreir_without_ctrl(CodegenOptions& options,
     }
   }
 
+
   auto def = ub->newModuleDef();
 
   auto sched_maps = get_maps(schedmap);
@@ -2748,8 +2749,19 @@ CoreIR::Module*  generate_coreir_without_ctrl(CodegenOptions& options,
     if(!hwinfo.check_if_compute_created(op)) {
       generate_coreir_compute_unit(options, found_compute, def, op, prg, buffers, hwinfo);
       hwinfo.set_compute_is_created(op);
+      cout << "Compue unit created... for op: " << op->name << endl;
     }
   }
+
+  cout << "LOADED COMPUTE FILE" << endl;
+  cout << "Should be in context..." << endl;
+  auto namespaces = context->getNamespaces();
+  cout << "Printing namespaces..." << endl;
+  for (auto ns : namespaces) {
+    cout << ns.first << endl;
+    cout << ns.second->getName() << endl;
+  }
+  // assert(false);
 
   //Add a pass to see if there is a glb
   for (auto& it: buffers) {

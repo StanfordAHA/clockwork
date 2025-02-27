@@ -7,6 +7,9 @@
 
 #include "qexpr.h"
 #include "prog.h"
+#include "coreir/ir/json.h"
+typedef nlohmann::json Json;
+
 
 using namespace std;
 
@@ -1105,6 +1108,8 @@ class UBuffer {
     vector<int> read_cycle, write_cycle;
     vector<vector<int> > read_addr, write_addr;
     HWconstraints hardware;
+    // This is for the final lowering to coreir json...
+    map<string, map<string, string>> collect_port_mappings;
 
 #ifdef COREIR
     json config_file;
@@ -1150,6 +1155,7 @@ class UBuffer {
     }
 
     Json add_rv_info_to_json(Json config_file, UBuffer& target_buf);
+    // json add_rv_info_to_json(json config_file, UBuffer& target_buf);
 
     vector<std::string> tokenize_string(std::string str, std::string delimiter) {
         std::vector<std::string> tokens;

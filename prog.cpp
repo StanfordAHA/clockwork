@@ -5149,10 +5149,10 @@ umap* prog::validity_deps() {
     cout << "Producer Map = " << str(producer_map(b)) << endl;
     cout << "Consumer Map = " << str(consumer_map(b)) << endl;
 
-    cout << "MEK Writes = " << str(writes) << endl;
-    cout << "MEK Reads = " << str(reads) << endl;
+    cout << "Writes = " << str(writes) << endl;
+    cout << "Reads = " << str(reads) << endl;
 
-    cout << "MEK Inverse Reads = " << str(inv(reads)) << endl;
+    cout << "Inverse Reads = " << str(inv(reads)) << endl;
 
     auto writers_to_readers = dot(writes, inv(reads));
     cout << "Writers to readers = " << str(writers_to_readers) << endl;

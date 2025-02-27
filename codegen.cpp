@@ -1465,8 +1465,15 @@ map<string, UBuffer> build_buffers(prog& prg, umap* opt_sched, schedule_info & h
       isl_map* origin_sched = to_map(its(opt_sched, domains.at(op)));
 
       int slack = hwinfo.get_compute_inpt_slack(op, name, mem_port_cnt.at(name));
+      cout << "Op: " << op->name << endl;
+      cout << "Buffer: " << name << endl;
+      cout << "Slack: " << slack << endl;
+      cout << "Memport cnt: " << mem_port_cnt.at(name) << endl;
+      cout << "Port name: " << pt_name << endl;
       cout << "origin sched: " << str(origin_sched) << endl;;
       isl_map* outpt_sched = linear_schedule(origin_sched, {1}, slack, false);
+      cout << "outpt_sched: " << str(outpt_sched) << endl;
+
 
       buf.add_out_pt(pt_name, domains.at(op), consumed_here, to_umap(outpt_sched));
 

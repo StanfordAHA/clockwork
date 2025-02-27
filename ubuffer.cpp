@@ -889,7 +889,6 @@ map<string, UBuffer> UBuffer::generate_ubuffer(CodegenOptions& options) {
     cout << "CGPL level : " << coarse_grained_pipeline_loop_level << endl;
     auto inpts = get_bank_inputs(b.name);
     auto outpts = get_bank_unique_outputs(b.name);
-    cout << "MEK HERE 789" << endl;
     //add a sort of output make sure we have positive stride when coalesce
     vector<string> pt_vec(outpts.begin(), outpts.end());
     sort(pt_vec.begin(), pt_vec.end(), [this](const string l, const string r) {
@@ -897,7 +896,6 @@ map<string, UBuffer> UBuffer::generate_ubuffer(CodegenOptions& options) {
               auto r_start = lexminpt(range(access_map.at(r)));
               return lex_lt_pt(l_start, r_start);
               });
-    cout << "MEK HERE 456" << endl;
     int usuffix = 0;
 
     //FIXME: this is a hack to identify shift register optimization
@@ -950,7 +948,6 @@ map<string, UBuffer> UBuffer::generate_ubuffer(CodegenOptions& options) {
     buffers[bname] = buf;
   }
 
-  cout << "MEK HERE 123" << endl;
   return buffers;
 }
 
@@ -1733,7 +1730,6 @@ UBuffer UBuffer::generate_ubuffer(CodegenOptions& options, UBufferImpl& impl, sc
     buf.coarse_grained_pipeline_loop_level = coarse_grained_pipeline_loop_level;
     cout << "CGPL level : " << coarse_grained_pipeline_loop_level << endl;
     cout << impl << endl;
-    cout << "MEK HERE 123" << endl;
     auto inpts = impl.get_unique_inpts(bank);
     auto outpts = impl.get_unique_outpts(bank);
     cout <<"impl inputs: "<< inpts << endl;
@@ -1754,7 +1750,6 @@ UBuffer UBuffer::generate_ubuffer(CodegenOptions& options, UBufferImpl& impl, sc
     int op_latency = 0;
     //FIXME: this is a hack for broadcast latency
     int broadcast_latency = info.get_ub_latency(name, bank);
-    cout << "MEK HERE 456" << endl;
 
     for (string inpt: inpts) {
       auto acc_map = to_map(access_map.at(inpt));
@@ -1827,7 +1822,7 @@ UBuffer UBuffer::generate_ubuffer(CodegenOptions& options, UBufferImpl& impl, sc
       }*/
       //string pt_name = bname + "_" + ::name(dom) + "_" + to_string(usuffix);
 
-      cout << "MEK HERE BEFORE IS SHIFT REG" << endl;
+      cout << "HERE BEFORE IS SHIFT REG" << endl;
 
       if (impl.is_shift_register_output(outpt)) {
         cout << impl << endl;
@@ -1919,7 +1914,6 @@ UBuffer UBuffer::generate_ubuffer(CodegenOptions& options, UBufferImpl& impl, sc
       //FIXME: should do this after figure out vectorization dimension
       //Maybe it's correct ???
       //ASPLOS: this need to be tested for high throughput
-    // MEK: This is the last time
     buf.linear_address_space(project_out_zero_dim(to_set(buf.global_range())), options.mem_hierarchy.at("mem").fetch_width);
     //buf.linear_address_space(project_out_zero_dim(rddom),
     //        max(4/*fetch_width*/, stride_in_dim(rddom, ::num_dims(rddom) - 1)));
@@ -3545,6 +3539,7 @@ CoreIR::Instance* UBuffer::generate_lake_tile_instance(
   };
   cout << "Add lake node:" << ub_ins_name << " with input_num = " << input_num
       << ", output_num = " << output_num << endl;
+    cout << "DEF NAME AGAIN: " << def->getName() << endl;
   if (options.pass_through_valid) {
     //modargs["config"] = CoreIR::Const::make(context, config_file);
     auto* g = context->getGenerator("cgralib.Mem_amber");
@@ -3677,6 +3672,19 @@ void UBuffer::wire_ubuf_IO(CodegenOptions& options,CoreIR::ModuleDef* def, map<s
       //CoreIR::map_insert(outpt_bank_rd, outpt, tmp);
       if (impl.outpt_to_bank.at(outpt).size() == 1) {
         //no chaining
+        // Add information for collection...
+        auto op_port_name_orig = pt2wire.at(outpt)->toString();
+        auto op_port_name_trim = op_port_name_orig.substr(0, op_port_name_orig.find("["));
+        auto op_port_name_num = op_port_name_orig.substr(op_port_name_orig.find("[") + 1, op_port_name_orig.find("]") - op_port_name_orig.find("[") - 1);
+
+        auto final_port_name_use = op_port_name_trim + "." + op_port_name_num;
+        collect_port_mappings[outpt] = {};
+        collect_port_mappings[outpt]["op_port"] = final_port_name_use;
+        // Need to construct the name which consists of the buffer name
+        auto bank_name_str = impl.lowering_info.at(bank_id).target_buf.name;
+        auto full_bank_name_with_ub = "ub_" + bank_name_str + "_garnet." + memDataoutPort(options, config_mode, outpt_cnt);
+        collect_port_mappings[outpt]["reg_name"] = full_bank_name_with_ub;
+        cout << "WIRING PORTS: ub port name: " << outpt << " and coreirname: " << full_bank_name_with_ub << " with op_port: " << final_port_name_use << endl;
         def->connect(buf->sel(memDataoutPort(options, config_mode, outpt_cnt)), pt2wire.at(outpt));
       } else {
 
@@ -3769,6 +3777,8 @@ void UBuffer::generate_sreg_and_wire(CodegenOptions& options, UBufferImpl& impl,
 
   cout << "GENERATING SREG BEGIN" << endl;
 
+  // map<string, map<string, string>> collect_port_mappings;
+
   auto context = def->getContext();
   for (auto it: impl.get_shift_registered_ports()) {
     cout << "SHIFT REG INFO" << endl;
@@ -3799,16 +3809,41 @@ void UBuffer::generate_sreg_and_wire(CodegenOptions& options, UBufferImpl& impl,
     //cout << *this << endl;
     CoreIR::Wireable* final_out = def->sel(final_out_name);
 
+    collect_port_mappings[dst] = {};
+    collect_port_mappings[dst]["op_port"] = final_out_name;
+
+    // If Delay is 0, fall back to information from its source, if the source is not in
+    // the map, we need to populate it with the source information that would be directly on the unified buffer/memory
+    if(delay == 0){
+      // If it's not in the map...populate it with the source information...
+      if(collect_port_mappings.find(src) == collect_port_mappings.end()){
+        // Check if the source is an in port
+        assert(isIn.at(src));
+        collect_port_mappings[src] = {};
+        collect_port_mappings[src]["op_port"] = "NULL";
+        collect_port_mappings[src]["reg_name"] = "NULL";
+      }
+      else{
+        // If it is in the map, just copy it over
+        collect_port_mappings[dst]["reg_name"] = collect_port_mappings[src]["reg_name"];
+      }
+    }
+
     for (size_t i = 0; i < delay; i ++) {
 
-      std::string prefix_ = "mek_d_reg_";
-      if(i == delay - 1){
-        prefix_ = "mek_d_reg_NONEMPTYFIFO_";
-      }
+      std::string prefix_ = "d_reg_";
+      // if(i == delay - 1){
+      //   prefix_ = "d_reg_NONEMPTYFIFO_";
+      // }
 
       std::string suffix = context->getUnique();
       auto full_name = prefix_ + suffix;
       cout << "Map this port " << dst << " to " << full_name << endl;
+
+      // The last iteration is the actual port we want...
+      if(i == (delay - 1)){
+        collect_port_mappings[dst]["reg_name"] = full_name;
+      }
 
       auto reg = def->addInstance(full_name, "mantle.reg",
           {{"width", CoreIR::Const::make(context, port_widths)},
@@ -3819,6 +3854,16 @@ void UBuffer::generate_sreg_and_wire(CodegenOptions& options, UBufferImpl& impl,
     }
     def->connect(last_out, final_out);
   }
+
+  // Print out the collect_port_mappings information...
+  cout << "COLLECT PORT MAPPINGS" << endl;
+  for (auto it : collect_port_mappings){
+    cout << "ub_port: " << it.first << endl;
+    cout << "op_port: " << it.second["op_port"] << endl;
+    cout << "reg_name: " << it.second["reg_name"] << endl;
+    cout << endl;
+  }
+
 }
 
 //Take the fanin structure and generate the wiring
@@ -3897,6 +3942,7 @@ string UBuffer::determine_config_mode(CodegenOptions& options, UBuffer& target_b
 }
 
 Json UBuffer::add_rv_info_to_json(Json config_file, UBuffer& target_buf) {
+// json UBuffer::add_rv_info_to_json(json config_file, UBuffer& target_buf) {
   cout << "Adding rv info to json for buffer " << target_buf.name << endl;
   // config_file["rv"] = "GOTIT";
 
@@ -4260,6 +4306,7 @@ Json UBuffer::add_rv_info_to_json(Json config_file, UBuffer& target_buf) {
 
 CoreIR::Instance* UBuffer::map_ubuffer_to_cgra(CodegenOptions& options, CoreIR::ModuleDef* def, GarnetImpl& hw_impl) {
   cout << "MAP BUFFER TO CGRA: " << hw_impl.target_buf.name << endl;
+  cout << "DEF NAME: " << def->getName() << endl;
   UBuffer target_buf = hw_impl.target_buf;
   string ub_ins_name = "ub_" + target_buf.name;
   CoreIR::Instance* buf;
@@ -5014,7 +5061,7 @@ void UBuffer::generate_coreir_refactor(CodegenOptions& options,
         schedule_info& info, //TODO:remove this
         bool with_ctrl) {
 
-  cout << "generate_coreir_refactor MEK" << endl;
+  cout << "generate_coreir_refactor" << endl;
 
   auto context = def->getContext();
   map<string, CoreIR::Wireable*> pt2wire;
@@ -5790,7 +5837,8 @@ void UBuffer::generate_coreir(CodegenOptions& options,
 
     CoreIR::RecordType* utp = context->Record(ub_field);
     // auto ub = ns->newModuleDecl(buf.name + "_ub", utp);
-    auto ub = ns->newModuleDecl(buf.name + "_ub_mek", utp);
+    cout << "BUF NAME: " << buf.name << endl;
+    auto ub = ns->newModuleDecl(buf.name + "_ub", utp);
     auto def = ub->newModuleDef();
 
     //TODO: use a more general switch
@@ -12528,7 +12576,7 @@ map<string, pair<string, int> >  determine_shift_reg_map(
   }
 
   if (!any_reduce_ops_on_buffer) {
-    cout << "==== No reduce ops on this buffer" << endl;
+    cout << "==== No reduce ops on this buffer (1)" << endl;
     for (auto outpt : buf.get_out_ports()) {
       for (auto inpt : buf.get_in_ports()) {
         string reader_name = domain_name(pick(get_maps(buf.access_map.at(outpt))));
@@ -12580,7 +12628,7 @@ map<string, pair<string, int> >  determine_shift_reg_map(
 }
 
 map<string, vector<pair<string, int> > > determine_shift_reg_map_new(
-        prog& prg,
+    prog& prg,
     UBuffer& buf,
     schedule_info& hwinfo)
 {
@@ -12598,9 +12646,12 @@ map<string, vector<pair<string, int> > > determine_shift_reg_map_new(
   }
 
   if (!any_reduce_ops_on_buffer) {
-    cout << "==== No reduce ops on this buffer" << endl;
+    cout << "==== No reduce ops on this buffer (2)" << endl;
+    cout << "Buf name: " << buf.name << endl;
     for (auto outpt : buf.get_out_ports()) {
       for (auto inpt : buf.get_in_ports()) {
+        cout << "In Port: " << inpt << endl;
+        cout << "Out Port: " << outpt << endl;
         string reader_name = domain_name(pick(get_maps(buf.access_map.at(outpt))));
         op* read_op = prg.find_op(reader_name);
 
@@ -12630,14 +12681,14 @@ map<string, vector<pair<string, int> > > determine_shift_reg_map_new(
             dependence_distance_singleton(buf, inpt, outpt, sc);
           if (dd.has_value()) {
             int dd_raw = dd.get_value();
-            cout << "MEK DD: " << dd_raw << endl;
+            cout << "DEBUG DD: " << dd_raw << endl;
             dd_raw -= hwinfo.compute_latency(write_op);
-            cout << "MEK DD AFTER: " << dd_raw << endl;
+            cout << "DEBUG DD AFTER: " << dd_raw << endl;
             if (write_op->buffers_read().size() > 0) {
               dd_raw -= hwinfo.load_latency(pick(write_op->buffers_read()));
             }
             dd_raw += hwinfo.load_latency(buf.name);
-            cout << "MEK DD AFTER 2: " << dd_raw << endl;
+            cout << "DEBUG DD AFTER 2: " << dd_raw << endl;
 
             if (!(dd_raw >= 0)) {
               cout << "Error: Negative dependence distance: " << dd_raw << endl;
@@ -12647,6 +12698,7 @@ map<string, vector<pair<string, int> > > determine_shift_reg_map_new(
           }
         }
       }
+      cout << endl << endl << endl;
     }
   }
   return shift_registered_outputs;
@@ -12667,6 +12719,7 @@ dgraph build_in_to_out_shift_register_graph(CodegenOptions& options, prog& prg, 
       for (auto pt_delay_pair: pt.second) {
         string inpt = pt_delay_pair.first;
         int delay = pt_delay_pair.second;
+        cout << "Adding edge..." << inpt << " to " << outpt << " with delay " << delay << endl;
         dg.add_fanin_edge(inpt, outpt, delay);
       }
       fanin_node = true;
@@ -12674,6 +12727,7 @@ dgraph build_in_to_out_shift_register_graph(CodegenOptions& options, prog& prg, 
       for (auto pt_delay_pair: pt.second) {
         string inpt = pt_delay_pair.first;
         int delay = pt_delay_pair.second;
+        cout << "Adding edge..." << inpt << " to " << outpt << " with delay " << delay << endl;
         dg.add_edge(inpt, outpt, delay);
       }
 

@@ -21299,9 +21299,10 @@ void compile_for_garnet_single_port_mem(prog& prg,
 
   cout << "Validity deps..." << endl;
   auto vd = prg.validity_deps();
-  isl_ctx* isl_ctx_here = isl_union_map_get_ctx(vd);
-  isl_printer* p = isl_printer_to_file(isl_ctx_here, stdout);
-  isl_printer_print_union_map(p, vd);
+  // isl_ctx* isl_ctx_here = isl_union_map_get_ctx(vd);
+  // isl_printer* p = isl_printer_to_file(isl_ctx_here, stdout);
+  // isl_printer_print_union_map(p, vd);
+  cout << str(vd) << endl;
   // cout << vd << endl;
 
   cout << "Gather information about application..." << endl;
@@ -21318,7 +21319,6 @@ void compile_for_garnet_single_port_mem(prog& prg,
   // isl_printer* p = isl_printer_to_file(isl_map_get_space(sched_map), stdout);
 
   cout << "Printing conv 3 information..." << endl;
-  isl_printer_print_union_map(p, sched_map);
   cout << endl;
 
   cout << "Printing high-Dimensional schedule information..." << endl;
@@ -21327,7 +21327,8 @@ void compile_for_garnet_single_port_mem(prog& prg,
     // cout << str(key) << " -> " << str() << endl;
     cout << key->name << endl;
     // cout << p2 << endl;
-    isl_printer_print_map(p, val);
+    // isl_printer_print_map(p, val);
+    cout << str(val) << endl;
     cout << endl;
   }
 
@@ -21335,7 +21336,8 @@ void compile_for_garnet_single_port_mem(prog& prg,
   auto vd_new = prg.validity_deps();
   // isl_ctx* isl_ctx_here = isl_union_map_get_ctx(vd);
   // isl_printer* p = isl_printer_to_file(isl_ctx_here, stdout);
-  isl_printer_print_union_map(p, vd_new);
+  // isl_printer_print_union_map(p, vd_new);
+  cout << str(vd_new) << endl;
   cout << endl;
 
   // cout << str(sched_map_higher_d) << endl;
@@ -21347,7 +21349,7 @@ void compile_for_garnet_single_port_mem(prog& prg,
 
   cout << endl << endl << endl;
 
-  cout << "Printing buffer information...MEK" << endl;
+  cout << "Printing buffer information..." << endl;
 
   // Calculate dependencies here...
   for(auto buf_kp : buffers_opt){
