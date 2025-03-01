@@ -6134,6 +6134,157 @@ void generate_coreir_without_ctrl(CodegenOptions& options,
 
 
   auto global = context->getNamespace("global");
+
+  // Try to get the program...
+  Module* prg_mod_new = global->getModule(prg.name);
+  auto def = prg_mod_new->getDef();
+  cout << "PRINT PROGRAM" << endl;
+  cout << prg_mod_new->toString() << endl;
+  auto prg_instances = def->getInstances();
+  auto prg_connections = def->getConnections();
+  for (auto inst : prg_instances) {
+    cout << "Instance: " << inst.first << endl;
+    cout << inst.second->toString() << endl;
+  }
+  cout << endl << endl << endl;
+  cout << "Printing connections..." << endl;
+  for (auto conn : prg_connections) {
+    cout << conn.first->toString() << " -> " << conn.second->toString() << endl;
+  }
+
+  std::set<std::string> buffers_to_process;
+  for (auto buf : buffers) {
+    cout << "Buffer: " << buf.first << endl;
+    auto buf_use = buf.second;
+    // Check which buffers need more data...
+
+    for(auto output_port : buf_use.get_out_ports()){
+      cout << "This output port..." << output_port << endl;
+      // Check if the port is in the precursor_extra
+      if(buf_use.precursor_extra.find(output_port) == buf_use.precursor_extra.end()){
+        cout << "Port: " << output_port << " not in precursor_extra" << endl;
+        continue;
+      }
+
+      auto local_data_left = buf_use.get_remaining_data(output_port, 0);
+      cout << "Port: " << output_port << " has data left: " << local_data_left << endl;
+      if(local_data_left > 0){
+        buffers_to_process.insert(buf.first);
+      }
+    }
+  }
+
+  cout << "Buffers to process..." << endl;
+  for(auto buf : buffers_to_process){
+    auto buf_name_exclude = buf;
+    // Need to find all connections with this instance and instances outside of the instance
+    cout << buf << endl;
+    // Now go find each port of the buffer, correllate it with its final point in the graph, then find
+    // the path of no other intervening ports and add data on it
+    auto buf_object = buffers.at(buf);
+    // Assumption is we should traverse but avoid any instances in the same namespace
+    for(auto output_port : buf_object.get_out_ports()){
+      auto entry_point = buf_object.collect_port_mappings[output_port]["reg_name"];
+      cout << "Entry point: " << entry_point << endl;
+      auto this_instance_name = buf_name_exclude + "$" + entry_point;
+      auto curr_instance = this_instance_name;
+
+      // Need to know how much downstream data the port still needs
+      auto remaining_data = buf_object.get_remaining_data(output_port, 0);
+      auto any_non_pe = false;
+      while(remaining_data > 0){
+        vector<string> all_downstream_connections = {};
+        for(auto connection : def->getConnections()){
+          // If check if in first or second, if so, make sure other is out-of-instance PE
+          auto use_first = true;
+          if(connection.first->toString() == curr_instance){
+            use_first = true;
+          }
+          else if(connection.second->toString() == curr_instance){
+            use_first = false;
+          }
+          else{
+            continue;
+          }
+
+          cout << "At this connection" << endl;
+          cout << connection.first->toString() << " -> " << connection.second->toString() << endl;
+          auto other_instance = use_first ? connection.second->toString() : connection.first->toString();
+
+          // If to the same one, just ignore it...
+          if(other_instance.find(buf_name_exclude) != std::string::npos){
+            // any_non_pe = true;
+            // Don't know what to do if this happens yet...
+            // TODO: Handle this case
+            // assert(false);
+            continue;
+          }
+
+          // Check if "inner_compute" in connection name, if it is not, just die
+          if(other_instance.find("inner_compute") == std::string::npos){
+            any_non_pe = true;
+            // continue
+            // Don't know what to do if this happens yet...
+            // TODO: Handle this case
+            assert(false);
+          }
+
+          // Can add it now...
+          all_downstream_connections.push_back(other_instance);
+          curr_instance = other_instance;
+
+        }
+
+        // Make sure the size of downstream connections is still 1...
+        if(all_downstream_connections.size() != 1){
+          // Don't know what to do if this happens yet...
+          assert(false);
+        }
+
+        // Shouldn't need to check if there's another incoming branch
+        // because it should be guaranteed that there is uninterrupted room for buffering
+
+        for(auto downstream_connection : all_downstream_connections){
+          // If we are here, we know that the other instance is a PE, put as much data as we can into it
+          // TODO: Handle broadcast
+          // Put data at the input fifo first...
+          auto num_input_fifo_max = 2;
+          auto num_output_fifo_max = 2;
+          auto num_input_fifo = 0;
+          auto num_output_fifo = 0;
+
+          if(remaining_data <= num_input_fifo_max){
+            num_input_fifo = remaining_data;
+            buf_object.add_data_committed(output_port, 0, remaining_data);
+            remaining_data = 0;
+
+          }
+          else{
+            num_input_fifo = num_input_fifo_max;
+            buf_object.add_data_committed(output_port, 0, num_input_fifo_max);
+            remaining_data -= num_input_fifo_max;
+          }
+
+          if(remaining_data <= num_output_fifo_max){
+            num_output_fifo = remaining_data;
+            buf_object.add_data_committed(output_port, 0, remaining_data);
+            remaining_data = 0;
+
+          }
+          else{
+            num_output_fifo = num_output_fifo_max;
+            buf_object.add_data_committed(output_port, 0, num_output_fifo_max);
+            remaining_data -= num_output_fifo_max;
+          }
+
+          cout << "Placed data at this PE: " << downstream_connection << " with " << num_input_fifo << " input fifo and " << num_output_fifo << " output fifo" << endl;
+          cout << "Remaining data: " << remaining_data << endl;
+
+        }
+      }
+    }
+  }
+
   if(!saveToFile(global,  options.dir + prg.name+ "_to_metamapper.json", prg_mod)) {
     cout << "Could not save ubuffer coreir" << endl;
     context->die();

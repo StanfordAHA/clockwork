@@ -13380,15 +13380,7 @@ void generate_garnet_coreir(std::map<string, UBuffer> buffers_opt, prog prg, Cod
 
   cout << "generate_garnet_coreir: 1 - print buffers before" << endl;
   for ( auto const& [key, val]: buffers_opt) {
-    isl_printer* p2 = isl_printer_to_file(isl_union_map_get_ctx(val.global_schedule()), stdout);
-    // cout << str(key) << " -> " << str() << endl;
-    cout << key << "->" << val.name << endl;
-    isl_printer_print_union_map(p2, val.global_schedule());
-    cout << endl;
-    // cout << key << "->" << val.name << endl;
-    // cout << key << "->" << str(val.hardware) << endl;
-    // cout << p2 << endl;
-    // isl_printer_print_map(p, val);
+    cout << key << "->" << val << endl;
   }
   cout << "generate_garnet_coreir: 1 - print buffers after" << endl;
 

@@ -3328,6 +3328,50 @@ void tighten_address_space() {
     //smt stream generation
     void generate_smt_stream(CodegenOptions& options);
     void collect_memory_cnt(CodegenOptions& options, mem_access_cnt& mem_access);
+
+    int get_remaining_data(string output_port, int pos){
+      auto data_extra_vec = precursor_extra.at(output_port);
+      int data_extra_int = 0;
+      for(auto it__ : data_extra_vec){
+        if(it__.first == pos){
+          data_extra_int = it__.second;
+        }
+      }
+      auto data_committed_vec = precursor_committed.at(output_port);
+      int data_committed_int = 0;
+      for(auto it__ : data_committed_vec){
+        if(it__.first == pos){
+          data_committed_int = it__.second;
+        }
+      }
+      auto local_data_left = data_extra_int - data_committed_int;
+      return local_data_left;
+    }
+
+    int get_data_committed(string output_port, int pos){
+      auto data_committed_vec = precursor_committed.at(output_port);
+      for(auto it__ : data_committed_vec){
+        if(it__.first == pos){
+          return it__.second;
+        }
+      }
+      return -1;
+    }
+
+    int add_data_committed(string output_port, int pos, int num_data){
+      auto data_committed_vec = precursor_committed.at(output_port);
+      for(int i = 0; i < data_committed_vec.size(); i++){
+        auto item__ = data_committed_vec[i];
+        if(item__.first == pos){
+          precursor_committed.at(output_port)[i].second += num_data;
+          return precursor_committed.at(output_port)[i].second;
+        }
+      }
+      return -1;
+    }
+
+
+
 #ifdef COREIR
     pair<isl_map*, isl_map*> get_bank_pt_IR(string inpt, isl_set* rddom, schedule_info & info);
     UBuffer generate_ubuffer(CodegenOptions& optiosn, UBufferImpl& impl, schedule_info & info, int bank);

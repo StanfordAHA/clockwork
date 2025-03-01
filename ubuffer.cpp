@@ -3855,7 +3855,7 @@ void UBuffer::generate_sreg_and_wire(CodegenOptions& options, UBufferImpl& impl,
 
       // The last iteration is the actual port we want...
       if(i == (delay - 1)){
-        collect_port_mappings[dst]["reg_name"] = full_name;
+        collect_port_mappings[dst]["reg_name"] = full_name + "$reg0.out";
         sreg_graph[chain_port_use].push_back({full_name, {true, dst}});
       }
       else{
