@@ -3841,7 +3841,9 @@ void UBuffer::generate_sreg_and_wire(CodegenOptions& options, UBufferImpl& impl,
       else{
         // If it is in the map, just copy it over
         collect_port_mappings[dst]["reg_name"] = collect_port_mappings[src]["reg_name"];
-        sreg_graph[chain_port_use].push_back({collect_port_mappings[dst]["reg_name"], {true, dst}});
+        // copy out last item
+        auto last_item = sreg_graph[chain_port_use].back();
+        sreg_graph[chain_port_use].push_back({last_item.first, {true, dst}});
       }
     }
 
@@ -3867,6 +3869,9 @@ void UBuffer::generate_sreg_and_wire(CodegenOptions& options, UBufferImpl& impl,
           {{"width", CoreIR::Const::make(context, port_widths)},
            {"has_en", CoreIR::Const::make(context, false)}});
            //  {"is_stencil_fifo", CoreIR::Const::make(context, true)}});
+
+      instance_map[full_name] = reg;
+
       def->connect(reg->sel("in"), last_out);
       last_out = reg->sel("out");
     }
@@ -3907,7 +3912,8 @@ void UBuffer::generate_sreg_and_wire(CodegenOptions& options, UBufferImpl& impl,
       if(reg_name.find("d_reg") != std::string::npos){
         // This is the case where we have a shift register...
         // Try adding as much data as possible
-        int max_data_per_reg = 2;
+        // int max_data_per_reg = 2;
+        int max_data_per_reg = 1;
         // for(int num_data_to_add = max_data_per_reg; num_data_to_add > 0; num_data_to_add--){
           // Collect all downstream ports and check how much they have left...
         // cout << "TRYING TO ADD THIS MUCH DATA: " << num_data_to_add << endl;
@@ -3972,6 +3978,14 @@ void UBuffer::generate_sreg_and_wire(CodegenOptions& options, UBufferImpl& impl,
   cout << "EXTRA DATA LOCATIONS" << endl;
   for(auto it : extra_data_locations){
     cout << "Reg name: " << it.first << " has extra data: " << it.second << endl;
+    auto reg_name = it.first;
+    auto reg_inst = instance_map[reg_name];
+    Json reg_inst_md;
+    if(reg_inst->hasMetaData()){
+      reg_inst_md = reg_inst->getMetaData();
+    }
+    reg_inst_md["extra_data"] = it.second;
+    reg_inst->setMetaData(reg_inst_md);
   }
 
   for(auto it : precursor_extra){

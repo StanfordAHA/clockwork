@@ -6182,6 +6182,24 @@ void generate_coreir_without_ctrl(CodegenOptions& options,
     // Now go find each port of the buffer, correllate it with its final point in the graph, then find
     // the path of no other intervening ports and add data on it
     auto buf_object = buffers.at(buf);
+
+    // Put the shift reg data in the fabric...
+    cout << "EXTRA DATA LOCATIONS (2)" << endl;
+    for(auto it : buf_object.extra_data_locations){
+      cout << "Reg name: " << it.first << " has extra data: " << it.second << endl;
+      auto reg_name = it.first;
+      auto reg_inst_name = buf_name_exclude + "$" + reg_name + "$reg0";
+      cout << "Find program instance at this name: " << reg_inst_name << endl;
+      auto reg_inst = prg_instances.at(reg_inst_name);
+      Json reg_inst_md;
+      if(reg_inst->hasMetaData()){
+        reg_inst_md = reg_inst->getMetaData();
+      }
+      reg_inst_md["extra_data"] = it.second;
+      reg_inst->setMetaData(reg_inst_md);
+    }
+
+
     // Assumption is we should traverse but avoid any instances in the same namespace
     for(auto output_port : buf_object.get_out_ports()){
       auto entry_point = buf_object.collect_port_mappings[output_port]["reg_name"];
@@ -6253,17 +6271,37 @@ void generate_coreir_without_ctrl(CodegenOptions& options,
           auto num_input_fifo = 0;
           auto num_output_fifo = 0;
 
+          // Should I be able to just add these to json? cut off .data*
+          auto instance_name = downstream_connection.substr(0, downstream_connection.find(".data"));
+          auto downstream_inst = prg_instances.at(instance_name);
+
+          // prg_instances.at(instance_name)["config"] = {};
+
           if(remaining_data <= num_input_fifo_max){
             num_input_fifo = remaining_data;
+            // Add this config to the PE
             buf_object.add_data_committed(output_port, 0, remaining_data);
             remaining_data = 0;
-
           }
           else{
             num_input_fifo = num_input_fifo_max;
             buf_object.add_data_committed(output_port, 0, num_input_fifo_max);
             remaining_data -= num_input_fifo_max;
           }
+
+          auto inst_modargs = downstream_inst->getModArgs();
+          auto inst_metadata = downstream_inst->getMetaData();
+          cout << "MODARGS" << endl;
+          for(auto it__ : inst_modargs) {
+            cout << it__.first << " -> " << it__.second << endl;
+          }
+          cout << "METADATA" << endl;
+          // for(auto it__ : inst_metadata) {
+          cout << inst_metadata << endl;
+          // }
+          // prg_instances.at(instance_name)["config"]["num_input_fifo"] = num_input_fifo;
+          // downstream_inst->getModArgs()["num_input_fifo"] = CoreIR::IntType(num_input_fifo);
+          inst_metadata["num_input_fifo"] = num_input_fifo;
 
           if(remaining_data <= num_output_fifo_max){
             num_output_fifo = remaining_data;
@@ -6277,8 +6315,17 @@ void generate_coreir_without_ctrl(CodegenOptions& options,
             remaining_data -= num_output_fifo_max;
           }
 
+          // downstream_inst->getModArgs()["num_output_fifo"] = CoreIR::IntType(num_output_fifo);
+          inst_metadata["num_output_fifo"] = num_output_fifo;
+          downstream_inst->setMetaData(inst_metadata);
+
+
+
+          // prg_instances.at(instance_name)["config"]["num_output_fifo"] = num_output_fifo;
           cout << "Placed data at this PE: " << downstream_connection << " with " << num_input_fifo << " input fifo and " << num_output_fifo << " output fifo" << endl;
           cout << "Remaining data: " << remaining_data << endl;
+
+
 
         }
       }

@@ -1115,6 +1115,8 @@ class UBuffer {
     map<string, vector<pair<int, int>>> precursor_committed;
     map<string, int> extra_data_locations;
 
+    map<string, CoreIR::Instance *> instance_map;
+
 #ifdef COREIR
     json config_file;
 #endif
