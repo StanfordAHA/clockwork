@@ -3646,6 +3646,19 @@ void UBuffer::wire_ubuf_IO(CodegenOptions& options,CoreIR::ModuleDef* def, map<s
     assert(inpt_broadcast_set.size() == 1);
     for (auto inpt: inpt_broadcast_set) {
       if (isIn.at(inpt)){
+
+        auto op_port_name_orig = pt2wire.at(inpt)->toString();
+        auto op_port_name_trim = op_port_name_orig.substr(0, op_port_name_orig.find("["));
+        auto op_port_name_num = op_port_name_orig.substr(op_port_name_orig.find("[") + 1, op_port_name_orig.find("]") - op_port_name_orig.find("[") - 1);
+
+        auto final_port_name_use = op_port_name_trim + "." + op_port_name_num;
+        collect_port_mappings[inpt] = {};
+        collect_port_mappings[inpt]["op_port"] = final_port_name_use;
+
+        auto bank_name_str = impl.lowering_info.at(bank_id).target_buf.name;
+        auto full_bank_name_with_ub = "ub_" + bank_name_str + "_garnet." + memDatainPort(options, config_mode, inpt_cnt);
+        collect_port_mappings[inpt]["reg_name"] = full_bank_name_with_ub;
+
         //cout << "BUF Wire inpt: " << memDatainPort(options, config_mode, inpt_cnt) << " with " << pt2wire.at(inpt)->toString() << endl;
         def->connect(buf->sel(memDatainPort(options, config_mode, inpt_cnt)), pt2wire.at(inpt));
 
@@ -5245,6 +5258,7 @@ void UBuffer::generate_coreir_refactor(CodegenOptions& options,
   }
 
   //Go through the banks and generate connection and config
+  map<int, CoreIR::Instance*> bank2buf;
   for (auto it: impl.bank_rddom) {
     auto bank_id = it.first;
 
@@ -5260,6 +5274,7 @@ void UBuffer::generate_coreir_refactor(CodegenOptions& options,
     // assert(false);
 
     CoreIR::Instance* buf = map_ubuffer_to_cgra(options, def, target_buf_impl);
+    bank2buf[bank_id] = buf;
     insert_accumulation_register_with_existing_buf(
             options, def, buf, target_buf_impl, pt2wire);
 
@@ -5280,6 +5295,36 @@ void UBuffer::generate_coreir_refactor(CodegenOptions& options,
   //Generate the shift register connection
   cout << "GENERATING SHIFT REGISTERS FOR IMPL" << endl;
   generate_sreg_and_wire(options, impl, def, pt2wire);
+
+  // Go through the banks and give them the config file.
+  for(auto b2b : bank2buf){
+    cout << "BANK2BUF: " << b2b.first << " -> " << b2b.second->toString() << endl;
+    auto bank_id = b2b.first;
+    auto capture_local_metadata = b2b.second->getMetaData()["config"];
+    auto target_buf_impl = impl.lowering_info.at(bank_id);
+    auto tb = target_buf_impl.target_buf;
+    auto tb_output_ports = tb.get_out_ports();
+    auto tb_input_ports = tb.get_in_ports();
+    capture_local_metadata["port_mappings"] = {};
+    // Emit the port mapping as well...
+    for(auto impltb_input_port : tb_input_ports){
+      // Can actually get the
+      cout << "IMPL TARG BUF INPUT PORT: " << impltb_input_port << endl;
+      auto cpm_entry = collect_port_mappings[impltb_input_port];
+      cout << "CPM ENTRY: " << cpm_entry["reg_name"] << endl;
+      cout << "Putting this in config file: " << cpm_entry["reg_name"] << endl;
+      capture_local_metadata["port_mappings"][impltb_input_port] = cpm_entry["reg_name"];
+    }
+    for(auto impltb_output_port : tb_output_ports){
+      // Can actually get the
+      cout << "IMPL TARG BUF OUTPUT PORT: " << impltb_output_port << endl;
+      auto cpm_entry = collect_port_mappings[impltb_output_port];
+      cout << "CPM ENTRY: " << cpm_entry["reg_name"] << endl;
+      cout << "Putting this in config file: " << cpm_entry["reg_name"] << endl;
+      capture_local_metadata["port_mappings"][impltb_output_port] = cpm_entry["reg_name"];
+    }
+    b2b.second->getMetaData()["config"] = capture_local_metadata;
+  }
 
   generate_fanin_connection(options, impl, def, pt2wire, info);
 
