@@ -6168,9 +6168,9 @@ void generate_coreir_without_ctrl(CodegenOptions& options,
 
       auto local_data_left = buf_use.get_remaining_data(output_port, 0);
       cout << "Port: " << output_port << " has data left: " << local_data_left << endl;
-      if(local_data_left > 0){
-        buffers_to_process.insert(buf.first);
-      }
+      // if(local_data_left > 0){
+      buffers_to_process.insert(buf.first);
+      // }
     }
   }
 
