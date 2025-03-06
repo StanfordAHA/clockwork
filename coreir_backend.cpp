@@ -2873,10 +2873,10 @@ CoreIR::Module*  generate_coreir_without_ctrl(CodegenOptions& options,
 
       cout << "SHOW LOWERED BUFFS" << endl;
       for(auto l : lowering_information){
-        auto buf = impl.lowering_info.at(l.first).target_buf;
-        if(buf.dependencies.size() > 0){
+        auto buf_ = impl.lowering_info.at(l.first).target_buf;
+        if(buf_.dependencies.size() > 0){
           cout << "(LOWERED) Showing deps for buffer: " << l.first << endl;
-          for(auto dep_info : buf.dependencies){
+          for(auto dep_info : buf_.dependencies){
             auto port_pair = dep_info.first;
             auto dep_vec = dep_info.second;
             cout << port_pair.first << " -> " << port_pair.second << " : " << dep_vec << endl;
@@ -2906,6 +2906,8 @@ CoreIR::Module*  generate_coreir_without_ctrl(CodegenOptions& options,
         auto writer_name = sro.second.first;
         // Now we have the port name - find it in the original buf and print its information
         // Get domain and access map
+        // Simplify address space here????
+        buf.second.simplify_address_space();
         auto buf_access_map = buf.second.access_map.at(port_name);
         auto buf_domain = buf.second.domain.at(port_name);
         cout << "Domain: " << str(buf_domain) << endl;
@@ -2923,10 +2925,10 @@ CoreIR::Module*  generate_coreir_without_ctrl(CodegenOptions& options,
             auto new_domain = gimpl_targ_buf.domain.at(port_name);
             // Get non-simplified...
             auto new_access_map = gimpl_targ_buf.access_map_non_simplified.at(port_name);
-            auto new_access_map_ns = gimpl_targ_buf.access_map.at(port_name);
+            auto new_access_map_simplified = gimpl_targ_buf.access_map.at(port_name);
             cout << "Domain: " << str(new_domain) << endl;
-            cout << "Access Map: " << str(new_access_map) << endl;
-            cout << "Access Map NS: " << str(new_access_map_ns) << endl;
+            cout << "Access Map (NS): " << str(new_access_map) << endl;
+            cout << "Access Map (S) : " << str(new_access_map_simplified) << endl;
 
             normal_ports.push_back(port_name);
 
@@ -2985,7 +2987,8 @@ CoreIR::Module*  generate_coreir_without_ctrl(CodegenOptions& options,
             // Check if empty...
             auto ss = get_sets(diff_domains);
             if(ss.size() == 0){
-              impl.lowering_info.at(l.first).target_buf.domain_difference[port_name] = nullptr;
+              cout << "Setting to nullptr... (1)" << endl;
+              // impl.lowering_info.at(l.first).target_buf.domain_difference[port_name] = nullptr;
             }
             else{
               impl.lowering_info.at(l.first).target_buf.domain_difference[port_name] = to_set(cpy(diff_domains));
@@ -3033,7 +3036,8 @@ CoreIR::Module*  generate_coreir_without_ctrl(CodegenOptions& options,
             // Check if empty...
             auto ss = get_sets(diff_domains);
             if(ss.size() == 0){
-              impl.lowering_info.at(l.first).target_buf.domain_difference[port_name] = nullptr;
+              cout << "Setting to nullptr... (2)" << endl;
+              // impl.lowering_info.at(l.first).target_buf.domain_difference[port_name] = nullptr;
             }
             else{
               impl.lowering_info.at(l.first).target_buf.domain_difference[port_name] = to_set(cpy(diff_domains));
@@ -3410,15 +3414,21 @@ CoreIR::Module*  generate_coreir_without_ctrl(CodegenOptions& options,
 
       cout << "AFTER GARNET LOWERING" << endl;
 
-
-
       cout << "TRY PRINTING IMPL DOMAIN DIFF... " << buf.first << endl;
       for(auto l : impl.lowering_info) {
         auto gimpl = l.second;
         auto gimpl_targ_buf = gimpl.target_buf;
         cout << "GIMPL: " << l.first << endl;
+        cout << "TARGET BUF: " << endl << gimpl_targ_buf << endl;
         for(auto dd_it:gimpl_targ_buf.domain_difference){
-          cout << dd_it.first << " -> " << str(dd_it.second) << endl;
+          // Check if dd_it.second is nullptr
+          if(dd_it.second == nullptr){
+            cout << dd_it.first << " -> nullptr" << endl;
+            cout << "NO DIFFERENCE!" << endl;
+          }
+          else{
+            cout << dd_it.first << " -> " << str(dd_it.second) << endl;
+          }
         }
       }
 
@@ -6199,16 +6209,40 @@ void generate_coreir_without_ctrl(CodegenOptions& options,
       reg_inst->setMetaData(reg_inst_md);
     }
 
-
     // Assumption is we should traverse but avoid any instances in the same namespace
     for(auto output_port : buf_object.get_out_ports()){
       auto entry_point = buf_object.collect_port_mappings[output_port]["reg_name"];
+      cout << "Output Port: " << output_port << endl;
       cout << "Entry point: " << entry_point << endl;
-      auto this_instance_name = buf_name_exclude + "$" + entry_point;
-      auto curr_instance = this_instance_name;
+      auto buf_instance_name = buf_name_exclude + "$" + entry_point;
+      auto curr_instance = buf_instance_name;
+      // We found an input data port
+      if(entry_point.find("data_in") != std::string::npos){
+        cout << "This is a data_in...need to swap to the wire that drives this then follow that" << endl;
+        // Assume that there is only one wire driving this input...
+        for(auto connection : def->getConnections()){
+          auto use_first = true;
+          if(connection.first->toString() == curr_instance){
+            use_first = true;
+          }
+          else if(connection.second->toString() == curr_instance){
+            use_first = false;
+          }
+          else{
+            // This port isn't in this connection...
+            continue;
+          }
+          auto other_instance_ = use_first ? connection.second->toString() : connection.first->toString();
+          cout << "Replacing " << curr_instance << " with " << other_instance_ << endl;
+          curr_instance = other_instance_;
+          break;
+        }
+      }
 
       // Need to know how much downstream data the port still needs
+      cout << "Getting remaining data..." << endl;
       auto remaining_data = buf_object.get_remaining_data(output_port, 0);
+      cout << "This much data left (before starting...): " << remaining_data << endl;
       auto any_non_pe = false;
       while(remaining_data > 0){
         vector<string> all_downstream_connections = {};
@@ -6229,12 +6263,25 @@ void generate_coreir_without_ctrl(CodegenOptions& options,
           cout << connection.first->toString() << " -> " << connection.second->toString() << endl;
           auto other_instance = use_first ? connection.second->toString() : connection.first->toString();
 
+          auto curr_instance_name = connection.first->toString().substr(0, connection.first->toString().find("$"));
+          auto other_instance_name = connection.second->toString().substr(0, connection.second->toString().find("$"));
+          cout << "Buf instance name: " << buf_instance_name << endl;
+          cout << "Curr instance name: " << curr_instance_name << endl;
+          cout << "other instance name: " << other_instance_name << endl;
           // If to the same one, just ignore it...
-          if(other_instance.find(buf_name_exclude) != std::string::npos){
+          // if(other_instance.find(buf_name_exclude) != std::string::npos){
+          if(buf_instance_name == other_instance_name){
             // any_non_pe = true;
             // Don't know what to do if this happens yet...
             // TODO: Handle this case
             // assert(false);
+            continue;
+          }
+
+          // If the other guy has "data_in" in the name, it's another buffer's input port, ignore it
+          if(other_instance.find("data_in") != std::string::npos){
+            // any_non_pe = true;
+            // Don't know what to do if this happens yet...
             continue;
           }
 
@@ -6244,19 +6291,26 @@ void generate_coreir_without_ctrl(CodegenOptions& options,
             // continue
             // Don't know what to do if this happens yet...
             // TODO: Handle this case
-            assert(false);
+            // assert(false);
+            continue;
+            // Don't add the connections that loop back...
           }
 
           // Can add it now...
+          cout << "Adding this downstream instance..." << other_instance << endl;
           all_downstream_connections.push_back(other_instance);
-          curr_instance = other_instance;
+          cout << "Now there are this many downstream conns: " << all_downstream_connections.size() << endl;
+          // curr_instance = other_instance;
 
         }
 
         // Make sure the size of downstream connections is still 1...
         if(all_downstream_connections.size() != 1){
           // Don't know what to do if this happens yet...
-          assert(false);
+          cout << "MORE THAN 1 CONNECTION" << endl;
+          cout << "Remaining data: " << remaining_data << endl;
+          cout << "This many connections... " << all_downstream_connections.size() << endl;
+          // assert(false);
         }
 
         // Shouldn't need to check if there's another incoming branch
@@ -6271,8 +6325,22 @@ void generate_coreir_without_ctrl(CodegenOptions& options,
           auto num_input_fifo = 0;
           auto num_output_fifo = 0;
 
+          cout << "Downstream connection..." << downstream_connection << endl;
+
           // Should I be able to just add these to json? cut off .data*
-          auto instance_name = downstream_connection.substr(0, downstream_connection.find(".data"));
+          string instance_name;
+          // Check if .data is in the name
+          if(downstream_connection.find(".data") != std::string::npos){
+            instance_name = downstream_connection.substr(0, downstream_connection.find(".data"));
+          }
+          else if(downstream_connection.find(".O0") != std::string::npos){
+            instance_name = downstream_connection.substr(0, downstream_connection.find(".O0"));
+          }
+          else{
+            cout << "Couldn't find the name to make it..." << endl;
+            instance_name = downstream_connection;
+          }
+
           auto downstream_inst = prg_instances.at(instance_name);
 
           // prg_instances.at(instance_name)["config"] = {};
@@ -6319,13 +6387,14 @@ void generate_coreir_without_ctrl(CodegenOptions& options,
           inst_metadata["num_output_fifo"] = num_output_fifo;
           downstream_inst->setMetaData(inst_metadata);
 
-
-
           // prg_instances.at(instance_name)["config"]["num_output_fifo"] = num_output_fifo;
           cout << "Placed data at this PE: " << downstream_connection << " with " << num_input_fifo << " input fifo and " << num_output_fifo << " output fifo" << endl;
           cout << "Remaining data: " << remaining_data << endl;
 
-
+          // Now at the end of this, can move along in the chain...
+          curr_instance = downstream_connection;
+          // TODO: Fix
+          break;
 
         }
       }

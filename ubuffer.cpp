@@ -3658,6 +3658,7 @@ void UBuffer::wire_ubuf_IO(CodegenOptions& options,CoreIR::ModuleDef* def, map<s
         auto bank_name_str = impl.lowering_info.at(bank_id).target_buf.name;
         auto full_bank_name_with_ub = "ub_" + bank_name_str + "_garnet." + memDatainPort(options, config_mode, inpt_cnt);
         collect_port_mappings[inpt]["reg_name"] = full_bank_name_with_ub;
+        collect_port_mappings[inpt]["node_name"] = full_bank_name_with_ub;
 
         //cout << "BUF Wire inpt: " << memDatainPort(options, config_mode, inpt_cnt) << " with " << pt2wire.at(inpt)->toString() << endl;
         def->connect(buf->sel(memDatainPort(options, config_mode, inpt_cnt)), pt2wire.at(inpt));
@@ -3697,6 +3698,7 @@ void UBuffer::wire_ubuf_IO(CodegenOptions& options,CoreIR::ModuleDef* def, map<s
         auto bank_name_str = impl.lowering_info.at(bank_id).target_buf.name;
         auto full_bank_name_with_ub = "ub_" + bank_name_str + "_garnet." + memDataoutPort(options, config_mode, outpt_cnt);
         collect_port_mappings[outpt]["reg_name"] = full_bank_name_with_ub;
+        collect_port_mappings[outpt]["node_name"] = full_bank_name_with_ub;
         cout << "WIRING PORTS: ub port name: " << outpt << " and coreirname: " << full_bank_name_with_ub << " with op_port: " << final_port_name_use << endl;
         def->connect(buf->sel(memDataoutPort(options, config_mode, outpt_cnt)), pt2wire.at(outpt));
       } else {
@@ -3815,7 +3817,8 @@ void UBuffer::generate_sreg_and_wire(CodegenOptions& options, UBufferImpl& impl,
       new_chain = true;
       chain_port_use = src;
       sreg_graph[chain_port_use] = {};
-      sreg_graph[chain_port_use].push_back({collect_port_mappings[src]["reg_name"], {true, src}});
+      // Use node name and not reg name (remove $reg0.out)
+      sreg_graph[chain_port_use].push_back({collect_port_mappings[src]["node_name"], {true, src}});
     }
     int delay = it.second.second;
     auto wire = pt2wire.at(src);
@@ -3850,44 +3853,57 @@ void UBuffer::generate_sreg_and_wire(CodegenOptions& options, UBufferImpl& impl,
         collect_port_mappings[src] = {};
         collect_port_mappings[src]["op_port"] = "NULL";
         collect_port_mappings[src]["reg_name"] = "NULL";
+        collect_port_mappings[src]["node_name"] = "NULL";
       }
-      else{
-        // If it is in the map, just copy it over
-        collect_port_mappings[dst]["reg_name"] = collect_port_mappings[src]["reg_name"];
-        // copy out last item
-        auto last_item = sreg_graph[chain_port_use].back();
-        sreg_graph[chain_port_use].push_back({last_item.first, {true, dst}});
-      }
+      // else{
+      // If it is in the map, just copy it over
+      collect_port_mappings[dst]["reg_name"] = collect_port_mappings[src]["reg_name"];
+      collect_port_mappings[dst]["node_name"] = collect_port_mappings[src]["node_name"];
+      // copy out last item
+      auto last_item = sreg_graph[chain_port_use].back();
+      cout << "last_item.first: " << last_item.first << endl;
+      sreg_graph[chain_port_use].push_back({last_item.first, {true, dst}});
+      // }
     }
+
+    // Try putting in two regs per delay stage to trick it to makes fifos...
+    int num_regs_per_fifo = 1;
 
     for (size_t i = 0; i < delay; i ++) {
 
       std::string prefix_ = "d_reg_";
 
-      std::string suffix = context->getUnique();
-      auto full_name = prefix_ + suffix;
-      cout << "Map this port " << dst << " to " << full_name << endl;
+      for (size_t j = 0; j < num_regs_per_fifo; j++){
 
-      // The last iteration is the actual port we want...
-      if(i == (delay - 1)){
-        collect_port_mappings[dst]["reg_name"] = full_name + "$reg0.out";
-        sreg_graph[chain_port_use].push_back({full_name, {true, dst}});
+        std::string suffix = context->getUnique();
+        auto full_name = prefix_ + suffix;
+        cout << "Map this port " << dst << " to " << full_name << endl;
+
+        // The last iteration is the actual port we want...
+        if((i == (delay - 1)) && (j == (num_regs_per_fifo - 1))){
+          sreg_graph[chain_port_use].push_back({full_name, {true, dst}});
+          collect_port_mappings[dst]["reg_name"] = full_name + "$reg0.out";
+          collect_port_mappings[dst]["node_name"] = full_name;
+        }
+        else{
+          // If not at the end, push back false
+          sreg_graph[chain_port_use].push_back({full_name, {false, ""}});
+        }
+
+        auto reg = def->addInstance(full_name, "mantle.reg",
+            {{"width", CoreIR::Const::make(context, port_widths)},
+             {"has_en", CoreIR::Const::make(context, false)}});
+             //  {"is_stencil_fifo", CoreIR::Const::make(context, true)}});
+
+        instance_map[full_name] = reg;
+
+        def->connect(reg->sel("in"), last_out);
+        last_out = reg->sel("out");
       }
-      else{
-        // If not at the end, push back false
-        sreg_graph[chain_port_use].push_back({full_name, {false, ""}});
-      }
 
-      auto reg = def->addInstance(full_name, "mantle.reg",
-          {{"width", CoreIR::Const::make(context, port_widths)},
-           {"has_en", CoreIR::Const::make(context, false)}});
-           //  {"is_stencil_fifo", CoreIR::Const::make(context, true)}});
 
-      instance_map[full_name] = reg;
-
-      def->connect(reg->sel("in"), last_out);
-      last_out = reg->sel("out");
     }
+
     def->connect(last_out, final_out);
     previous_dst = dst;
     previous_src = src;
@@ -3899,6 +3915,7 @@ void UBuffer::generate_sreg_and_wire(CodegenOptions& options, UBufferImpl& impl,
     cout << "ub_port: " << it.first << endl;
     cout << "op_port: " << it.second["op_port"] << endl;
     cout << "reg_name: " << it.second["reg_name"] << endl;
+    cout << "node_name: " << it.second["node_name"] << endl;
     cout << endl;
   }
 
@@ -3947,6 +3964,16 @@ void UBuffer::generate_sreg_and_wire(CodegenOptions& options, UBufferImpl& impl,
         int total_data_left = std::numeric_limits<int>::max();
         // Only handling data at the lowest level
         for(auto downstream_port : all_downstream_ports){
+          cout << "HANDLING: " << downstream_port << endl;
+          cout << "PRINTING PRECURSOR_EXTRA KEYS" << endl;
+          for(auto it__ : precursor_extra){
+            cout << it__.first << endl;
+          }
+          // Check if downstream_port is in precursor_extra
+          if(precursor_extra.find(downstream_port) == precursor_extra.end()){
+            cout << "NOT IN PRECURSOR EXTRA --- means no extra data for this!!!: " << downstream_port << endl;
+            continue;
+          }
           auto data_extra_vec = precursor_extra.at(downstream_port);
           int data_extra_int = 0;
           for(auto it__ : data_extra_vec){
@@ -3992,6 +4019,8 @@ void UBuffer::generate_sreg_and_wire(CodegenOptions& options, UBufferImpl& impl,
   for(auto it : extra_data_locations){
     cout << "Reg name: " << it.first << " has extra data: " << it.second << endl;
     auto reg_name = it.first;
+    // Check that reg_name is in instance map...
+    assert(instance_map.find(reg_name) != instance_map.end());
     auto reg_inst = instance_map[reg_name];
     Json reg_inst_md;
     if(reg_inst->hasMetaData()){
@@ -4143,7 +4172,7 @@ Json UBuffer::add_rv_info_to_json(Json config_file, UBuffer& target_buf) {
         filtered_points.push_back(dom_pt);
       }
     }
-    cout << "Filtered points: " << endl;
+    // cout << "Filtered points: " << endl;
     for(auto dom_pt:filtered_points){
       // cout << "Filtered domain point: " << str(dom_pt) << endl;
       filtered_points_set.push_back(to_set(dom_pt));
@@ -4155,15 +4184,15 @@ Json UBuffer::add_rv_info_to_json(Json config_file, UBuffer& target_buf) {
     for(int dim_ = num_dims_aff - 1; dim_ >= 0; dim_--){
 
       int idx = num_dims_aff - dim_;
-      cout << "Checking dimension: " << idx << endl;
-      cout << "Extents: " << extents_dom.at(idx) << endl;
-      cout << "Mins: " << extents_mins.at(idx) << endl;
-      cout << "Maxs: " << extents_maxs.at(idx) << endl;
+      // cout << "Checking dimension: " << idx << endl;
+      // cout << "Extents: " << extents_dom.at(idx) << endl;
+      // cout << "Mins: " << extents_mins.at(idx) << endl;
+      // cout << "Maxs: " << extents_maxs.at(idx) << endl;
 
       // If the coordinate of the first point
       int coord_idx = num_dims_aff - dim_;
       int curr_coord = to_int(coord(first_point_original_domain, coord_idx));
-      cout << "Current coord at position " << dim_ << " is: " << curr_coord << endl;
+      // cout << "Current coord at position " << dim_ << " is: " << curr_coord << endl;
       // If coordinate is not 0, iterate through up until this point and check that
       if(curr_coord > 0){
 
@@ -4241,11 +4270,11 @@ Json UBuffer::add_rv_info_to_json(Json config_file, UBuffer& target_buf) {
           cout << "Found a precursor: " << curr_coord << " at dimension: " << dim_ << " with size: " << num_data_emitted << endl;
 
           if(precursor_map.find(dim_) == precursor_map.end()){
-            cout << "Wasn't in the map yet..." << endl;
+            // cout << "Wasn't in the map yet..." << endl;
             precursor_map[dim_] = curr_coord;
             num_data_precursor[dim_] = num_data_emitted;
           } else if((num_data_emitted * curr_coord) > (num_data_precursor[dim_] * precursor_map[dim_])){
-            cout << "Bigger precursor than current one..." << endl;
+            // cout << "Bigger precursor than current one..." << endl;
             precursor_map[dim_] = curr_coord;
             num_data_precursor[dim_] = num_data_emitted;
           }
@@ -4313,6 +4342,28 @@ Json UBuffer::add_rv_info_to_json(Json config_file, UBuffer& target_buf) {
     }
   }
 
+  cout << "PRECURSOR LOCAL BEFORE ADDING OTHERS" << endl;
+  for(auto it: precursor_local){
+    cout << "Output port: " << it.first << " has local precursors: " << endl;
+    for(auto loc_it: it.second){
+      cout << "Dimension: " << loc_it.first << " with delta: " << loc_it.second << endl;
+    }
+  }
+
+  // Need to populate precursor_local with all the other ports that didn't make it because they
+  // inherently have a precursor_local of 0 in all directions (since they didn't originally have a domain_difference)
+  // for(auto output_port : target_buf.get_out_ports()){
+  for(auto output_port : get_out_ports()){
+    cout << "Output port: " << output_port << endl;
+    if(precursor_local.find(output_port) == precursor_local.end()){
+      precursor_local[output_port] = {};
+      for(auto it: precursor_map){
+        precursor_local[output_port].push_back({it.first, 0});
+      }
+    }
+  }
+
+  cout << "PRECURSOR LOCAL AFTER ADDING OTHERS" << endl;
   for(auto it: precursor_local){
     cout << "Output port: " << it.first << " has local precursors: " << endl;
     for(auto loc_it: it.second){
@@ -4489,7 +4540,14 @@ CoreIR::Instance* UBuffer::map_ubuffer_to_cgra(CodegenOptions& options, CoreIR::
     cout << "Generate lake tile instance...bef" << endl;
     auto tb = hw_impl.target_buf;
     for(auto it: tb.domain_difference){
-      cout << "PRINTING DOMAIN DIFF: " << it.first << " : " << str(it.second) << endl;
+      cout << "PRINTING DOMAIN DIFF: " << it.first << " : ";
+      if(it.second == nullptr){
+        cout << "NULL" << endl;
+      }
+      else{
+        cout << str(it.second) << endl;
+      }
+
       cout << "NUM OUTPUT PORTS : " << tb.num_out_ports() << endl;
     }
     config_file = generate_ubuf_args(options, hw_impl.sub_component);
@@ -5268,7 +5326,12 @@ void UBuffer::generate_coreir_refactor(CodegenOptions& options,
     for(auto domain_diff_it : target_buf_impl.target_buf.domain_difference){
 
       cout << "DOMAIN DIFF AT " << domain_diff_it.first << endl;
-      cout << str(domain_diff_it.second) << endl;
+      if(domain_diff_it.second == nullptr){
+        cout << "NULLPTR" << endl;
+      }
+      else{
+        cout << str(domain_diff_it.second) << endl;
+      }
     }
 
     // assert(false);
@@ -5292,7 +5355,7 @@ void UBuffer::generate_coreir_refactor(CodegenOptions& options,
     generate_lake_tile_verilog(options, buf);
   }
 
-  //Generate the shift register connection
+  // Generate the shift register connection
   cout << "GENERATING SHIFT REGISTERS FOR IMPL" << endl;
   generate_sreg_and_wire(options, impl, def, pt2wire);
 
