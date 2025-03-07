@@ -2922,6 +2922,7 @@ CoreIR::Module*  generate_coreir_without_ctrl(CodegenOptions& options,
           // cout << "Exists in impl: " << exists_in_impl << endl;
 
           if(exists_in_impl){
+            cout << "Port that still exists in the implementation..." << endl;
             auto new_domain = gimpl_targ_buf.domain.at(port_name);
             // Get non-simplified...
             auto new_access_map = gimpl_targ_buf.access_map_non_simplified.at(port_name);
@@ -3049,6 +3050,14 @@ CoreIR::Module*  generate_coreir_without_ctrl(CodegenOptions& options,
             use_domains_save.insert({port_name, cpy(new_domain)});
             use_access_maps_save.insert({port_name, cpy(new_access_map)});
 
+            // Also just check if the original port it was siphoned off was in there...others might need it later
+            // In the case of an output port that is a delay 0 of another output port of delay 0 from an input...
+            if(use_domains_save.count(writer_name) == 0){
+              cout << "Writer name not already in save" << endl;
+              use_domains_save.insert({writer_name, cpy(new_domain)});
+              use_access_maps_save.insert({writer_name, cpy(new_access_map)});
+            }
+
           }
           cout << "PRINT GIMPL DOMAIN DIFFERENCES" << endl;
           for(auto dd_it:gimpl_targ_buf.domain_difference){
@@ -3097,16 +3106,44 @@ CoreIR::Module*  generate_coreir_without_ctrl(CodegenOptions& options,
           else{
 
             // If the port writer is in the shift_registered_outputs, then we should use the writer name, else use the saved name
+            cout << "Writer name original: " << writer_name << endl;
             auto writer_name_use = writer_name;
+            cout << "Writer name use: " << writer_name_use << endl;
 
             // Check if it's in there...
             auto in_sro = impl.shift_registered_outputs.count(writer_name_use) > 0;
 
             if(in_sro){
+              cout << "In SRO..." << endl;
               write_name_save = writer_name_use;
             }
             else{
-              writer_name_use = write_name_save;
+              cout << "Not in SRO..." << endl;
+              // It's possible that it is in this sroo but from an input, so check if it's in the inputs...
+              auto buf_abstract_inputs = buf.second.get_in_ports();
+              auto buf_impl_inputs = gimpl_targ_buf.get_in_ports();
+              // Find the port in here...
+
+              if (std::find(buf_abstract_inputs.begin(), buf_abstract_inputs.end(), writer_name_use) != buf_abstract_inputs.end()) {
+                cout << "Found in abstract inputs..." << endl;
+              }
+              // auto in_abstract_inputs = buf_abstract_inputs.count(writer_name_use) > 0;
+              auto in_abstract_inputs = (std::find(buf_abstract_inputs.begin(), buf_abstract_inputs.end(), writer_name_use) != buf_abstract_inputs.end());
+              // auto in_impl_inputs = buf_impl_inputs.count(writer_name_use) > 0;
+              auto in_impl_inputs = (std::find(buf_impl_inputs.begin(), buf_impl_inputs.end(), writer_name_use) != buf_impl_inputs.end());
+
+              auto in_saved = use_domains_save.count(writer_name_use) > 0;
+
+              cout << "In abstract inputs: " << in_abstract_inputs << endl;
+              cout << "In impl inputs: " << in_impl_inputs << endl;
+              cout << "In saved inputs: " << in_saved << endl;
+              // If the port isn't in either input, need to use the saved name
+              if(!(in_abstract_inputs || in_impl_inputs || in_saved)){
+                writer_name_use = write_name_save;
+              }
+
+              cout << "Using this writer name... " << writer_name_use << endl;
+
             }
 
             siphoned_from_normal_port_ports.push_back({port_name, writer_name_use});
@@ -3155,9 +3192,18 @@ CoreIR::Module*  generate_coreir_without_ctrl(CodegenOptions& options,
               impl.lowering_info.at(l.first).target_buf.domain_difference[port_name] = to_set(cpy(diff_domains));
             }
 
+            // Need to save these for downstream...
+            if(use_domains_save.count(port_name) == 0){
+              cout << "Writer name not already in save" << endl;
+              use_domains_save.insert({port_name, cpy(new_domain)});
+              use_access_maps_save.insert({port_name, cpy(new_access_map)});
+            }
+
           }
 
         }
+
+
 
         cout << endl << endl << endl;
 
@@ -3405,8 +3451,6 @@ CoreIR::Module*  generate_coreir_without_ctrl(CodegenOptions& options,
             rv_deps[std::make_pair(in_port.first, out_port.first)] = {};
           }
         }
-
-
 
       }
 
@@ -6244,7 +6288,13 @@ void generate_coreir_without_ctrl(CodegenOptions& options,
       auto remaining_data = buf_object.get_remaining_data(output_port, 0);
       cout << "This much data left (before starting...): " << remaining_data << endl;
       auto any_non_pe = false;
+      int loop_tries = 1000;
       while(remaining_data > 0){
+        loop_tries -= 1;
+        if(loop_tries == 0){
+          cout << "Loop tries exceeded..." << endl;
+          assert(false);
+        }
         vector<string> all_downstream_connections = {};
         for(auto connection : def->getConnections()){
           // If check if in first or second, if so, make sure other is out-of-instance PE
@@ -6263,18 +6313,19 @@ void generate_coreir_without_ctrl(CodegenOptions& options,
           cout << connection.first->toString() << " -> " << connection.second->toString() << endl;
           auto other_instance = use_first ? connection.second->toString() : connection.first->toString();
 
-          auto curr_instance_name = connection.first->toString().substr(0, connection.first->toString().find("$"));
-          auto other_instance_name = connection.second->toString().substr(0, connection.second->toString().find("$"));
-          cout << "Buf instance name: " << buf_instance_name << endl;
+          auto curr_instance_name = curr_instance.substr(0, curr_instance.find("$"));
+          auto other_instance_name = other_instance.substr(0, other_instance.find("$"));
+          cout << "Buf instance name: " << buf_name_exclude << endl;
           cout << "Curr instance name: " << curr_instance_name << endl;
           cout << "other instance name: " << other_instance_name << endl;
           // If to the same one, just ignore it...
           // if(other_instance.find(buf_name_exclude) != std::string::npos){
-          if(buf_instance_name == other_instance_name){
+          if(buf_name_exclude == other_instance_name){
             // any_non_pe = true;
             // Don't know what to do if this happens yet...
             // TODO: Handle this case
             // assert(false);
+            cout << "Skipping this connection since they are from the same instance..." << endl;
             continue;
           }
 
@@ -6282,11 +6333,13 @@ void generate_coreir_without_ctrl(CodegenOptions& options,
           if(other_instance.find("data_in") != std::string::npos){
             // any_non_pe = true;
             // Don't know what to do if this happens yet...
+            cout << "Skipping this connection since the other is an input to a memory... " << endl;
             continue;
           }
 
           // Check if "inner_compute" in connection name, if it is not, just die
-          if(other_instance.find("inner_compute") == std::string::npos){
+          // Also check if the other instance is an input reg (in camera_pipeline_2x2 it is)
+          if((other_instance.find("inner_compute") == std::string::npos) && (other_instance.find("reg0.in") == std::string::npos)){
             any_non_pe = true;
             // continue
             // Don't know what to do if this happens yet...
@@ -6307,7 +6360,7 @@ void generate_coreir_without_ctrl(CodegenOptions& options,
         // Make sure the size of downstream connections is still 1...
         if(all_downstream_connections.size() != 1){
           // Don't know what to do if this happens yet...
-          cout << "MORE THAN 1 CONNECTION" << endl;
+          cout << "NOT THAN 1 CONNECTION" << endl;
           cout << "Remaining data: " << remaining_data << endl;
           cout << "This many connections... " << all_downstream_connections.size() << endl;
           // assert(false);
@@ -6325,7 +6378,7 @@ void generate_coreir_without_ctrl(CodegenOptions& options,
           auto num_input_fifo = 0;
           auto num_output_fifo = 0;
 
-          cout << "Downstream connection..." << downstream_connection << endl;
+          cout << "Downstream connection... " << downstream_connection << endl;
 
           // Should I be able to just add these to json? cut off .data*
           string instance_name;
@@ -6335,6 +6388,9 @@ void generate_coreir_without_ctrl(CodegenOptions& options,
           }
           else if(downstream_connection.find(".O0") != std::string::npos){
             instance_name = downstream_connection.substr(0, downstream_connection.find(".O0"));
+          }
+          else if(downstream_connection.find(".in") != std::string::npos){
+            instance_name = downstream_connection.substr(0, downstream_connection.find(".in"));
           }
           else{
             cout << "Couldn't find the name to make it..." << endl;
