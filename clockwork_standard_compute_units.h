@@ -931,15 +931,15 @@ uint16_t round_to_even(float a) {
   //uint32_t e = reinterpret_cast<uint32_t&>(a);
   union_var.f = a;
   uint32_t e = union_var.val;
-  
+
   // round float to even, comment out this codeblock for truncation
   uint32_t half = 0x00008000;
   uint32_t sum = e + half;
-  
+
   // check if bottom bits are all zero
   uint32_t mantissa_mask = 0x0000ffff;
   bool is_zeroed = (sum & mantissa_mask) == 0;
-  
+
   // clear last bit (round even) on tie
   uint32_t clear_mask = ~( ((uint32_t)is_zeroed) << 16);
   e = sum & clear_mask;
@@ -1087,4 +1087,38 @@ bfloat16_t log_bf16(bfloat16_t a) {
   float result = logf(e);
   bfloat16_t result_bf16 = bfloat16_t::make_from_bits(round_to_even(result));
   return result_bf16;
+}
+
+// convert bfloat16 to int8 and pack two int8 values into one 16-bit value
+static inline
+bfloat16_t bf16toint8_pack(bfloat16_t in0, bfloat16_t in1) {
+    // Extract underlying 16-bit values from the bfloat16_t inputs.
+    uint16_t a = (uint16_t)in0;
+    uint16_t b = (uint16_t)in1;
+
+    // Process in0 (bf16 to int8 conversion)
+    uint16_t sign_a = a & 0x8000;
+    uint16_t mant_a = (a & 0x007F) | 0x0080;
+    uint16_t exp_a = (a & 0x7F80) >> 7;
+    int biased_exp_a = (int) exp_a;
+    int unbiased_exp_a = biased_exp_a - 127;
+    uint32_t mant_shift_a = (unbiased_exp_a < 0) ? 0 : ((uint32_t)mant_a << unbiased_exp_a);
+    uint8_t unsigned_res_a = (uint8_t)((mant_shift_a >> 7) & 0xFF);
+    int8_t int8_a = (sign_a == 0x8000) ? -((int8_t)unsigned_res_a) : ((int8_t)unsigned_res_a);
+
+    // Process in1 (bf16 to int8 conversion)
+    uint16_t sign_b = b & 0x8000;
+    uint16_t mant_b = (b & 0x007F) | 0x0080;
+    uint16_t exp_b = (b & 0x7F80) >> 7;
+    int biased_exp_b = (int) exp_b;
+    int unbiased_exp_b = biased_exp_b - 127;
+    uint32_t mant_shift_b = (unbiased_exp_b < 0) ? 0 : ((uint32_t)mant_b << unbiased_exp_b);
+    uint8_t unsigned_res_b = (uint8_t)((mant_shift_b >> 7) & 0xFF);
+    int8_t int8_b = (sign_b == 0x8000) ? -((int8_t)unsigned_res_b) : ((int8_t)unsigned_res_b);
+
+    // Pack the two int8 values into one 16-bit value.
+    uint16_t packed = (((uint16_t)((uint8_t)int8_a)) << 8) | ((uint8_t)int8_b);
+
+    // Construct and return a bfloat16_t from the packed 16-bit value.
+    return bfloat16_t(packed);
 }
