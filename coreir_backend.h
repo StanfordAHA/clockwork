@@ -7,8 +7,98 @@
 #define COREMK(ctx, v) CoreIR::Const::make((ctx), (v))
 
 static inline
+std::string exe_start_name(const std::string& n) {
+  return n + "_exe_start";
+}
+
+static inline
+std::string exe_start_control_vars_name(const std::string& n) {
+  return n + "_exe_start_control_vars";
+}
+
+static inline
+std::string read_start_control_vars_name(const std::string& n) {
+  return n + "_read_start_control_vars";
+}
+
+static inline
+std::string write_start_control_vars_name(const std::string& n) {
+  return n + "_write_start_control_vars";
+}
+
+static inline
+std::string read_start_name(const std::string& n) {
+  return n + "_read_start";
+}
+
+static inline
+std::string read_ready_name(const std::string& n) {
+  return n + "_read_ready";
+}
+
+static inline
+std::string write_start_name(const std::string& n) {
+  return n + "_write_start";
+}
+
+static inline
+std::string write_ready_name(const std::string& n) {
+  return n + "_write_ready";
+}
+
+static inline
+std::string cu_name(const std::string& n) {
+  return "cu_" + n;
+}
+
+
+static inline
 std::string controller_name(const std::string& n) {
   return n + "_port_controller";
+}
+
+static inline
+std::string ID_controller_name(const std::string& n) {
+  return n + "_ID_controller";
+}
+
+
+static inline
+CoreIR::Wireable* exe_start_control_vars(CoreIR::ModuleDef* def, const std::string& opname) {
+  return def->sel(exe_start_control_vars_name(opname))->sel("out");
+}
+
+static inline
+CoreIR::Wireable* read_start_control_vars(CoreIR::ModuleDef* def, const std::string& opname) {
+  return def->sel(controller_name(opname))->sel("d");
+  //return def->sel(read_start_control_vars_name(opname))->sel("out");
+}
+
+static inline
+CoreIR::Wireable* write_start_control_vars(CoreIR::ModuleDef* def, const std::string& opname) {
+  //return def->sel(controller_name(opname))->sel("d");
+  return def->sel(write_start_control_vars_name(opname))->sel("out");
+}
+
+static inline
+CoreIR::Wireable* read_start_wire(CoreIR::ModuleDef* def, const std::string& opname) {
+  return def->sel(read_start_name(opname))->sel("out");
+}
+
+static inline
+CoreIR::Wireable* write_start_wire(CoreIR::ModuleDef* def, const std::string& opname) {
+  return def->sel(write_start_name(opname))->sel("out");
+}
+
+//Although it called out but it's the input port
+static inline
+CoreIR::Wireable* write_ready_wire(CoreIR::ModuleDef* def, const std::string& opname) {
+  return def->sel(write_ready_name(opname))->sel("out");
+}
+
+static inline
+CoreIR::Wireable* read_ready_wire(CoreIR::ModuleDef* def, const std::string& opname) {
+  return def->sel(read_ready_name(opname))->sel("out");
 }
 
 vector<CoreIR::Wireable*> getConnectWires(CoreIR::Wireable* wire);
@@ -19,6 +109,7 @@ struct affine_controller_ctrl {
   isl_set* dom;
 };
 
+CoreIR::Wireable* op_control_wires(CoreIR::Instance* ctrl);
 
 CoreIR::Wireable* mkConst(CoreIR::ModuleDef* def, const int width, const int val);
 CoreIR::Wireable* addList(CoreIR::ModuleDef* def, const std::vector<CoreIR::Wireable*>& vals, int width);
@@ -41,6 +132,9 @@ CoreIR::Module* affine_controller(CoreIR::Context* context, isl_set* dom, isl_af
 CoreIR::Instance* affine_controller(CoreIR::ModuleDef* def, isl_set* dom, isl_aff* aff, int width);
 
 affine_controller_ctrl pack_controller(affine_controller_ctrl& unpacked);
+
+void generate_controller_for_compute_share(CodegenOptions& options, CoreIR::ModuleDef* def, vector<isl_map*> & sched_map, schedule_info& hwinfo, prog& prg);
+void generate_mux_for_compute_share(CoreIR::ModuleDef* def, map<string, UBuffer> & buffers, schedule_info& hwinfo, prog& prg);
 
 void generate_banks_garnet(CodegenOptions& options, prog& prg, UBuffer& buf, UBufferImpl& impl, schedule_info& hw_info);
 
@@ -70,7 +164,8 @@ void generate_coreir_without_ctrl(CodegenOptions& options,
     map<string, UBuffer>& buffers,
     prog& prg,
     umap* schedmap,
-    schedule_info& hwinfo);
+    schedule_info& hwinfo,
+    string dse_compute_filename);
 
   CoreIR::Wireable* delaybit(CoreIR::ModuleDef* bdef,
       CoreIR::Wireable* w);
@@ -91,18 +186,7 @@ CoreIR::Wireable* delay_array(CoreIR::ModuleDef* def,
     int elem_width,
     int num_elems);
 
-map<string, pair<string, int> > determine_shift_reg_map(
-        prog& prg,
-    UBuffer& buf,
-    schedule_info& hwinfo);
 
-vector<pair<string, pair<string, int> >> determine_output_shift_reg_map(
-        prog& prg,
-    UBuffer& buf,
-    schedule_info& hwinfo);
-
-
-dgraph build_shift_register_graph(CodegenOptions& options, prog& prg, UBuffer& buf, schedule_info& hwinfo);
 
 //CoreIR::Namespace* CoreIRLoadLibrary_cgralib(CoreIR::Context* c);
 
@@ -145,7 +229,7 @@ void generate_platonic_ubuffer(CodegenOptions& options,
 
 void generate_lake_tile_verilog(CodegenOptions& options, CoreIR::Instance* buf);
 
-void add_default_initial_block();
+void add_default_initial_block(string, string, int fetch_bit_width = 0);
 
 CoreIR::Wireable* delay_by(CoreIR::ModuleDef* bdef,
     CoreIR::Wireable* w,
@@ -169,28 +253,55 @@ void generate_platonic_ubuffer(
 
 void pipeline_compute_units(prog& prg, schedule_info& hwinfo);
 
+void add_pipeline_latency_compute_units(prog& prg, schedule_info& hwinfo); 
+
 int generate_compute_unit_regression_tb(op* op, prog& prg);
+
+CoreIR::Instance* build_counter(CoreIR::ModuleDef* def,
+        string name,
+        const int width,
+        const int min_val,
+        const int max_val,
+        const int inc_val);
 
 CoreIR::Instance* build_addrgen(const std::string& reader, UBuffer& buf, CoreIR::ModuleDef* def);
 CoreIR::Instance* build_addrgen(const std::string& reader, UBuffer& buf, CoreIR::ModuleDef* def, int width);
+CoreIR::Instance* build_addrgen_lake(const std::string& reader, UBuffer& buf, CoreIR::ModuleDef* def, int width);
 
 CoreIR::Wireable* control_vars(CoreIR::ModuleDef* def, const std::string& reader, UBuffer& buf);
 
 CoreIR::Wireable* control_en(CoreIR::ModuleDef* def, const std::string& reader, UBuffer& buf);
 
+//Towards ready valid
+CoreIR::Wireable* control_ready(CoreIR::ModuleDef* def, const std::string& reader, UBuffer& buf);
+CoreIR::Wireable* control_ready_by_bundle(CoreIR::ModuleDef* def, const std::string& reader, UBuffer& buf);
+
 CoreIR::Instance* build_bank_selector(const std::string& reader, UBuffer& buf, const EmbarrassingBankingImpl& impl, CoreIR::ModuleDef* def);
 
+//Helper function for get inner bank offset
+isl_map* get_inner_bank_access_map(const std::string& reader, UBuffer & buf, const EmbarrassingBankingImpl& impl);
 CoreIR::Instance* build_inner_bank_offset(const std::string& reader, UBuffer& buf, const EmbarrassingBankingImpl& impl, CoreIR::ModuleDef* def);
+CoreIR::Instance* build_inner_bank_offset(const std::string& reader, const std::string& shift_pt, UBuffer& buf, const EmbarrassingBankingImpl& impl, CoreIR::ModuleDef* def, int& sr_depth);
 
 std::set<string> generate_M1_shift_registers(CodegenOptions& options, CoreIR::ModuleDef* def, prog& prg, UBuffer& buf, schedule_info& hwinfo);
+void generate_M1_coreir(CodegenOptions& options, CoreIR::ModuleDef* def, prog& prg, UBuffer& orig_buf, schedule_info& hwinfo);
+void generate_Buffet_coreir(CodegenOptions& options, CoreIR::ModuleDef* def, prog& prg, UBuffer& orig_buf, schedule_info& hwinfo);
 
 void instantiate_M1_verilog(const std::string& long_name, const int b, const UBufferImpl& impl, UBuffer& buf);
 
 void M1_sanity_check_port_counts(const UBufferImpl& impl);
 
 CoreIR::Module* affine_controller_def(CoreIR::Context* context, isl_set* dom, isl_aff* aff);
+CoreIR::Wireable* create_ctrl_select(CoreIR::ModuleDef* def, vector<CoreIR::Wireable*> & conds, vector<CoreIR::Wireable*>& vals);
+
+CoreIR::Wireable* create_bank_enable(string& pt, int bank, CoreIR::ModuleDef* def,
+        map<string, std::set<int> > & inpt_to_bank,
+        map<string, CoreIR::Wireable*> ubuffer_port_bank_selectors,
+        CodegenOptions& options, prog& prg, UBuffer& buf, schedule_info& hwinfo);
 
 isl_aff* inner_bank_offset_aff(const std::string& reader, UBuffer& buf, const EmbarrassingBankingImpl& impl);
+isl_aff* inter_bank_offset_aff(const std::string& reader, UBuffer& buf, const EmbarrassingBankingImpl& impl);
+isl_set* get_inter_bank_enable_set(const std::string& reader, UBuffer& buf, const EmbarrassingBankingImpl& impl, int bankID);
 
 isl_aff* bank_offset_aff(const std::string& reader, UBuffer& buf, const EmbarrassingBankingImpl& impl);
 

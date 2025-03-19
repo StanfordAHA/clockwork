@@ -1263,6 +1263,182 @@ map<string, UBuffer> build_buffers(prog& prg, umap* opt_sched) {
   return buffers;
 }
 
+map<string, UBuffer> build_buffers(prog& prg, umap* opt_sched, schedule_info & hwinfo) {
+  int usuffix = 0;
+
+  map<string, UBuffer> buffers;
+  auto domains = prg.domains();
+  auto all_op = prg.all_ops();
+
+  //sort all ops by its name instead of ptr addres
+  //to avoid uncertainty in buffer name
+  vector<op*> all_op_vec(all_op.begin(), all_op.end());
+  std::sort(all_op_vec.begin(), all_op_vec.end(), [](op* l, op* r){return l->name > r->name;});
+
+  for (auto op : all_op_vec) {
+
+    for (auto consumed : op->produce_locs) {
+      string name = consumed.first;
+
+      if (!contains_key(name, buffers)) {
+        cout << "Creating ports for op: " << name << endl;
+        UBuffer buf;
+        buf.name = name;
+        buf.ctx = prg.ctx;
+        if (contains_key(name, prg.buffer_port_widths)) {
+          buf.port_widths = map_find(name, prg.buffer_port_widths);
+        }
+        buffers[name] = buf;
+      }
+
+      UBuffer& buf = buffers.at(name);
+
+      string pt_name = name + "_" + op->name + "_" + to_string(usuffix);
+      buf.port_bundles[op->name + "_write"].push_back(pt_name);
+
+      string cond = "{ ";
+      for (auto sec_pair : consumed.second) {
+        if (sec_pair.first == "") {
+          cond = cond + string(prg.op_iter(op) + " -> " + consumed.first + "[" + sec_pair.second + "]; ");
+
+        } else {
+          cond = cond + string(prg.op_iter(op) + " -> " + consumed.first + "[" + sec_pair.second + "] : " + sec_pair.first + "; ");
+        }
+      }
+      cond = cond.substr(0, cond.length() - 2);
+      cond = cond + string(" }");
+
+      cout << "cond = " << cond.c_str() << endl;
+      isl_map* consumed_here =
+        its(isl_map_read_from_str(buf.ctx, cond.c_str()), cpy(domains.at(op)));
+
+      assert(consumed_here != nullptr);
+
+      assert(contains_key(op, domains));
+
+      cout << "\tAdding output port: " << pt_name << endl;
+      cout << "\t\tConsumed: " << str(consumed_here) << endl;
+      buf.add_in_pt(pt_name, domains.at(op), consumed_here, its(opt_sched, domains.at(op)));
+
+      if (op->dynamic_reads(name)) {
+        buf.dynamic_ports.insert(pt_name);
+      }
+
+      vector<string> inpt = buf.get_in_ports();
+      cout << "current out port name: " << endl;
+      for_each(inpt.begin(), inpt.end(), [](string pt_name){cout <<"\t" << pt_name;});
+      cout << endl;
+
+      usuffix++;
+    }
+
+    map<string, int> mem_port_cnt; 
+    for (auto consumed : op->consume_locs_pair) {
+      string name = consumed.first;
+
+      //update the port count map
+      if (mem_port_cnt.count(name)) {
+        mem_port_cnt.at(name) ++;
+      } else {
+        mem_port_cnt[name] = 0;
+      }
+
+      if (!contains_key(name, buffers)) {
+        cout << "Creating ports for op: " << name << endl;
+        UBuffer buf;
+        buf.name = name;
+        buf.ctx = prg.ctx;
+        if (contains_key(name, prg.buffer_port_widths)) {
+          buf.port_widths = map_find(name, prg.buffer_port_widths);
+        }
+        buffers[name] = buf;
+      }
+
+      UBuffer& buf = buffers.at(name);
+
+      string pt_name = name + "_" + op->name + "_" + to_string(usuffix);
+      buf.port_bundles[op->name + "_read"].push_back(pt_name);
+
+      string cond = "{ ";
+      for (auto sec_pair : consumed.second) {
+        if (sec_pair.first == "") {
+          cond = cond + string(prg.op_iter(op) + " -> " + consumed.first + "[" + sec_pair.second + "]; ");
+
+        } else {
+          cond = cond + string(prg.op_iter(op) + " -> " + consumed.first + "[" + sec_pair.second + "] : " + sec_pair.first + "; ");
+        }
+      }
+      cond = cond.substr(0, cond.length() - 2);
+      cond = cond + string(" }");
+
+      cout << "cond = " << cond.c_str() << endl;
+      isl_map* consumed_here =
+        its(isl_map_read_from_str(buf.ctx, cond.c_str()), cpy(domains.at(op)));
+
+      assert(consumed_here != nullptr);
+
+      assert(contains_key(op, domains));
+
+      cout << "\tAdding output port: " << pt_name << endl;
+      cout << "\t\tConsumed: " << str(consumed_here) << endl;
+      cout << "Opt sched: " << str(opt_sched) << endl;
+      cout << "Dom      : " << str(domains.at(op)) << endl;
+      auto sched_dom = domain(opt_sched);
+      cout << "SDom     : " << str(sched_dom) << endl;
+
+      auto domain_its = its(sched_dom, to_uset(domains.at(op)));
+      cout << "Dom ITS  : " << str(domain_its) << endl;
+      cout << "Dom UNN  : " << str(unn(sched_dom, to_uset(domains.at(op)))) << endl;
+
+      cout << "Per group..." << endl;
+      for (auto dset : get_sets(sched_dom)) {
+        if (::name(dset) == op->name) {
+          isl_space* dspace = get_space(dset);
+          isl_space* other_dspace = get_space(domains.at(op));
+
+          isl_id* dspace_id = isl_space_get_tuple_id(dspace, isl_dim_set);
+          cout << tab(1) << "dspace_id       = " << str(dspace_id) << endl;
+          isl_id* other_dspace_id = isl_space_get_tuple_id(other_dspace, isl_dim_set);
+          cout << tab(1) << "other_dspace_id = " << str(other_dspace_id) << endl;
+
+          assert(dspace_id == other_dspace_id);
+          assert(isl_space_has_equal_params(dspace, other_dspace));
+          assert(isl_space_has_equal_tuples(dspace, other_dspace));
+          assert(isl_space_is_equal(dspace, other_dspace));
+          cout << tab(1) << "Schedule domain set: " << str(dset) << endl;
+          cout << tab(1) << "Domain set from prg: " << str(domains.at(op)) << endl;
+          cout << tab(1) << "ITS: " << str(its(dset, domains.at(op))) << endl;
+        }
+      }
+      auto op_sched_its = its(opt_sched, to_uset(domains.at(op)));
+      cout << "ITS      : " << str(op_sched_its) << endl;
+
+      assert(ctx(opt_sched) == ctx(domains.at(op)));
+
+      isl_map* origin_sched = to_map(its(opt_sched, domains.at(op)));
+
+      int slack = hwinfo.get_compute_inpt_slack(op, name, mem_port_cnt.at(name));
+      cout << "origin sched: " << str(origin_sched) << endl;;
+      isl_map* outpt_sched = linear_schedule(origin_sched, {1}, slack, false);  
+
+      buf.add_out_pt(pt_name, domains.at(op), consumed_here, to_umap(outpt_sched));
+
+      if (op->dynamic_reads(name)) {
+        buf.dynamic_ports.insert(pt_name);
+      }
+
+      vector<string> inpt = buf.get_out_ports();
+      cout << "current out port name: " << endl;
+      for_each(inpt.begin(), inpt.end(), [](string pt_name){cout <<"\t" << pt_name;});
+      cout << endl;
+
+      usuffix++;
+    }
+  }
+
+  return buffers;
+}
+
 
 void generate_app_code(map<string, UBuffer>& buffers, prog& prg, umap* sched) {
   CodegenOptions options;
@@ -3241,7 +3417,7 @@ void generate_garnet_verilator_tb(
       hw_sched,
       buffers);
 
-  rgtb << tab(1) << "V" << prg.name << " dut;" << endl;
+  rgtb << tab(1) << "static V" << prg.name << " dut;" << endl;
   if (options.debug_options.traceWave) {
     rgtb << tab(1) << "V"<< prg.name << "* dut_ptr = &dut;" << endl;
     rgtb << tab(1) << "Verilated::traceEverOn(true);" << endl;
@@ -3377,6 +3553,18 @@ void generate_verilator_tb_reset_sequence(CodegenOptions& options, ostream& rgtb
   //rgtb << tab(1) << "dut.eval();" << endl;
   eval(options, rgtb, 1);
 
+  if (options.rtl_options.target_tile == TARGET_TILE_BUFFET) {
+    //Add a posedge during  reset
+    rgtb << endl << tab(1) << "//Add a posedge during reset" << endl;
+    rgtb << tab(1) << "dut.clk = 0;" << endl;
+    //rgtb << tab(1) << "dut.eval();" << endl;
+    eval(options, rgtb, 1);
+    rgtb << tab(1) << "dut.clk = 1;" << endl;
+    //rgtb << tab(1) << "dut.eval();" << endl;
+    eval(options, rgtb, 1);
+    rgtb << endl;
+  }
+
   rgtb << tab(1) << "dut.rst_n = 1;" << endl;
   //rgtb << tab(1) << "dut.eval();" << endl;
   eval(options, rgtb, 1);
@@ -3468,6 +3656,20 @@ void generate_verilator_tb(
     rgtb << tab(1) << "tfp->open(\"sim_wave.vcd\");" << endl << endl;
   }
 
+
+  if (options.rtl_options.has_ready) {
+    rgtb << tab(1) << "//make sure input enable always ready" << endl;
+    for (auto in: inputs(buffers, prg)) {
+      rgtb << tab(1) << "dut." << in.first + "_" + in.second + "_en_ready = 1;" << endl;
+    }
+    rgtb << endl;
+    rgtb << tab(1) << "//make sure output consumer always ready" << endl;
+    for (auto out: outputs(buffers, prg)) {
+      rgtb << tab(1) << "dut." << out.first + "_" + out.second + "_ready = 1;" << endl;
+    }
+    rgtb << endl;
+  }
+
   generate_verilator_tb_reset_sequence(options, rgtb);
 
   for (auto out : inputs(buffers, prg)) {
@@ -3486,7 +3688,9 @@ void generate_verilator_tb(
   rgtb << tab(1) << "dut.clk = 0;" << endl;
   //rgtb << tab(1) << "dut.eval();" << endl;
   eval(options, rgtb, 1);
+  int max_time = to_int(lexmaxval(to_set(range(hw_sched)))) + 10;
   rgtb << tab(1) << "for (int t = 0; t < (int) pow(2, 16); t++) {" << endl;
+  //rgtb << tab(1) << "for (int t = 0; t < " + str(max_time) + "; t++) {" << endl;
 
   rgtb << tab(2) << "cout << \"t = \" << t << endl;" << endl;
   for (auto out : inputs(buffers, prg)) {
@@ -3498,21 +3702,30 @@ void generate_verilator_tb(
     rgtb << tab(3) << "cout << \"send me data!\" << endl;" << endl;
     rgtb << tab(3) << "*(" << data_name << ") = (int) " << out.first << ".read();" << endl;
     rgtb << tab(2) << "}" << endl;
+    if (options.rtl_options.has_ready) {
+      rgtb << endl << tab(2) << "//send the write enable singal" << endl;
+      rgtb << tab(2) << "if (dut." << ctrl_name << ") {" << endl;
+      rgtb << tab(3) << data_name << "_valid = 1;" << endl;
+      rgtb << tab(2) << "} else {" << endl;
+      rgtb << tab(3) << data_name << "_valid = 0;" << endl;
+      rgtb << tab(2) << "}" << endl;
+    }
   }
+
 
   for (auto out : outputs(buffers, prg)) {
     string ctrl_name =
       out.first + "_" + out.second + "_valid";
     string data_name =
       "dut." + out.first + "_" + out.second;
-    rgtb << tab(1) << ctrl_name << "_count += dut." << ctrl_name << ";" << endl;
-    rgtb << tab(1) << "if (dut." << ctrl_name << ") {" << endl;
-    rgtb << tab(2) << "cout << \"Got data: \" << (int) *(" << data_name << ") << endl;" << endl;
+    rgtb << tab(2) << ctrl_name << "_count += dut." << ctrl_name << ";" << endl;
+    rgtb << tab(2) << "if (dut." << ctrl_name << ") {" << endl;
+    rgtb << tab(3) << "cout << \"Got data: \" << (int) *(" << data_name << ") << endl;" << endl;
     //rgtb << tab(2) << "fout << t << \",\" << \"" << data_name << "\" << \",\" << (int) *(" << data_name << ") << endl;" << endl;
-    rgtb << tab(2) << "hw_uint<16> val((int) *(" << data_name << "));" << endl;
+    rgtb << tab(3) << "hw_uint<16> val((int) *(" << data_name << "));" << endl;
     //rgtb << tab(2) << "fout << val << endl;" << endl;
-    rgtb << tab(2) << out.first << ".write(val);" << endl;
-    rgtb << tab(1) << "}" << endl;
+    rgtb << tab(3) << out.first << ".write(val);" << endl;
+    rgtb << tab(2) << "}" << endl;
   }
 
   rgtb << tab(1) << tab(1) << "dut.clk = 0;" << endl;

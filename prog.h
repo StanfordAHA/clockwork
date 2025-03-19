@@ -60,6 +60,7 @@ struct ir_node {
 
   // If statement condition
   std::string condition;
+  ir_node* origin_lp; //record the origin child
 
   // Operations / other loops contained in this loop nest
   std::vector<op*> children;
@@ -86,14 +87,20 @@ struct ir_node {
   // latency which further extract by schedule into
   int latency = 0;
 
-  // Annotation used for debug printouts
+  // Annotation used for debug printouts, if all set to false,
+  // fuse all loop by inner most dim
   int unroll_factor;
+
+  // Tag for loop fusion
+  bool cgl_tag;
 
   isl_ctx* ctx;
 
   ir_node() : parent(nullptr),
+  origin_lp(nullptr),
   tp(IR_NODE_TYPE_OPERATION),
-  unroll_factor(1) {}
+  unroll_factor(1),
+  cgl_tag(false){}
 
   ~ir_node();
 
@@ -108,7 +115,7 @@ struct ir_node {
   void shift_address(const std::string& var, const std::vector<int>& min_locs);
 
   bool is_inner_loop() const {
-    if (this->is_loop()) {
+    if (!this->is_loop()) {
       return false;
     }
     for (auto c : children) {
@@ -166,6 +173,58 @@ struct ir_node {
   int trip_count() const {
     assert(is_loop());
     return end_exclusive - start;
+  }
+
+  void add_var_suffix_to_writes(const std::string& suffix, vector<string> & loop_var) {
+    for (auto& b : produce_locs) {
+        //buffer, piecese loc
+        for (auto& p : b.second) {
+            //condition, address expr
+            cout << "orgin expr: " << p.second << endl;
+            auto expr_list = split_at(p.second, ",");
+            vector<string> new_expr_list;
+            for (auto expr: expr_list) {
+              cout << "\t"<< expr << endl;
+              string new_expr = expr;
+              for (auto var: loop_var) {
+                if (contains(expr, var)) {
+                  new_expr = ReplaceString(expr, var, var + suffix);
+                  cout << "\tnew expr: " << new_expr << endl;
+                }
+              }
+              new_expr_list.push_back(new_expr);
+            }
+            p.second = sep_list(new_expr_list, "", "", ",");
+                cout << "new expr list: " << p.second << endl;
+        }
+
+    }
+  }
+
+  void add_var_suffix_to_reads(const std::string& suffix, vector<string> & loop_var) {
+    for (auto& b : consume_locs_pair) {
+        //buffer, piecese loc
+        for (auto& p : b.second) {
+            //condition, address expr
+            cout << "orgin expr: " << p.second << endl;
+            auto expr_list = split_at(p.second, ",");
+            vector<string> new_expr_list;
+            for (auto expr: expr_list) {
+              cout << "\t"<< expr << endl;
+              string new_expr = expr;
+              for (auto var: loop_var) {
+                if (contains(expr, var)) {
+                  new_expr = ReplaceString(expr, var, var + suffix);
+                  cout << "\tnew expr: " << new_expr << endl;
+                }
+              }
+              new_expr_list.push_back(new_expr);
+            }
+            p.second = sep_list(new_expr_list, "", "", ",");
+                cout << "new expr list: " << p.second << endl;
+        }
+
+    }
   }
 
   void add_prefix_to_writes(const std::string& prefix,
@@ -319,8 +378,22 @@ struct ir_node {
     index_variables_needed_by_compute.push_back(v);
   }
 
+  void rename_index_var(const std::string org, const std::string new_) {
+      for (string& var: index_variables_needed_by_compute) {
+          if (var == org) {
+              var = new_;
+          }
+      }
+  }
+
   void index_variable_prefetch_cycle(const int v) {
     index_variables_prefetch_cycle = v;
+  }
+
+  void add_index_var_suffix(const std::string & suffix) {
+    for (auto & compute_var : index_variables_needed_by_compute) {
+      compute_var += suffix;
+    }
   }
 
   map<op*, Box> get_domain_boxes() {
@@ -481,6 +554,7 @@ struct ir_node {
     op* sr = container_child(source);
     assert(sr != nullptr);
 
+    cout << sr->name << endl;
     cout << "Before inserting " << name << " we have " << children.size() << " children" << endl;
 
     auto lp = new op();
@@ -542,11 +616,13 @@ struct ir_node {
     return lp;
   }
 
-  op* add_if(const std::string& name, const std::string& condition) {
+  op* add_if(const std::string& name, const std::string& condition, op* imperfect_lp) {
     assert(!is_op());
 
     auto lp = new op();
+    lp->origin_lp = imperfect_lp; //this record the loop below the lp before loop perfection
     lp->name = name;
+    lp->origin_lp = imperfect_lp;
     lp->condition = condition;
     lp->ctx = ctx;
     lp->parent = this;
@@ -556,12 +632,14 @@ struct ir_node {
     return lp;
   }
 
-  op* add_if_front(const std::string& name, const std::string& condition) {
+  op* add_if_front(const std::string& name, const std::string& condition, op* imperfect_lp) {
     assert(!is_op());
 
     auto lp = new op();
     lp->name = name;
+    lp->origin_lp = imperfect_lp;
     lp->condition = condition;
+    lp->origin_lp = imperfect_lp; //this record the loop below the lp before loop perfection
     lp->ctx = ctx;
     lp->parent = this;
     lp->tp = IR_NODE_TYPE_IF;
@@ -587,6 +665,10 @@ struct ir_node {
     children.push_back(lp);
 
     return lp;
+  }
+
+  void coarse_grain_loop_tag() {
+    cgl_tag = true;
   }
 
   op* store(const pair<string, string>& dst, const pair<string, string>& src) {
@@ -858,6 +940,23 @@ struct ir_node {
     return loops;
   }
 
+  std::set<op*> all_loops_to_be_fused() {
+    std::set<op*> loops;
+    if (cgl_tag) {
+      loops.insert(this);
+    } else if (is_inner_loop()) {
+      //By default fuse at inner most level
+      loops.insert(this);
+    } else {
+      for (auto c: children) {
+        for (auto loop: c->all_loops_to_be_fused()) {
+          loops.insert(loop);
+        }
+      }
+    }
+    return loops;
+  }
+
   std::set<std::string> all_existing_loop_names() {
     std::set<string> names;
     for (auto op : all_root_ops()) {
@@ -915,6 +1014,57 @@ struct ir_node {
 
 };
 
+// struct cmp_op {
+//   bool operator() (op* l, op* r) const {
+//     return l->name < r->name;
+//   }
+// };
+
+
+struct cmp_op {
+  std::string toUpper(std::string s) const {
+    for(int i=0;i<(int)s.length();i++){s[i]=toupper(s[i]);}
+    return s;
+  }
+
+  bool compareNat(const std::string& a, const std::string& b) const {
+    if (a.empty())
+        return true;
+    if (b.empty())
+        return false;
+    if (std::isdigit(a[0]) && !std::isdigit(b[0]))
+        return true;
+    if (!std::isdigit(a[0]) && std::isdigit(b[0]))
+        return false;
+    if (!std::isdigit(a[0]) && !std::isdigit(b[0]))
+    {
+        if (a[0] == b[0])
+            return compareNat(a.substr(1), b.substr(1));
+        return (toUpper(a) < toUpper(b));
+        //toUpper() is a function to convert a std::string to uppercase.
+    }
+
+    // Both strings begin with digit --> parse both numbers
+    std::istringstream issa(a);
+    std::istringstream issb(b);
+    int ia, ib;
+    issa >> ia;
+    issb >> ib;
+    if (ia != ib)
+        return ia < ib;
+
+    // Numbers are the same --> remove numbers and recurse
+    std::string anew, bnew;
+    std::getline(issa, anew);
+    std::getline(issb, bnew);
+    return (compareNat(anew, bnew));
+  }
+
+  bool operator() (op* l, op* r) const {
+    return compareNat(l->name, r->name);
+  }
+};
+
 
 struct prog {
 
@@ -966,6 +1116,11 @@ struct prog {
     return add_loop(unique_name("l"), l, u);
   }
 
+  //Fuse at root level
+  void coarse_grain_loop_tag() {
+    root->coarse_grain_loop_tag();
+  }
+
   isl_set* domain(op* op);
   umap* read_map(op* op);
   isl_map* read_map(op* op, const std::string& buf);
@@ -1013,8 +1168,8 @@ struct prog {
         return v;
       }
     }
-    cout << "Error: No op named " << target_op << " in" << endl;
     pretty_print();
+    cout << "Error: No op named " << target_op << " in" << endl;
     assert(false);
   }
 
@@ -1035,6 +1190,11 @@ struct prog {
     cout << "Error: No op named " << target_op << " in" << endl;
     pretty_print();
     assert(false);
+  }
+
+  bool is_init_op(const std::string& target_op) {
+    op* v = find_op(target_op);
+    return v->read_addrs().size() == 0;
   }
 
   int trip_count(const std::string& loop_level) {
@@ -1294,13 +1454,13 @@ struct prog {
     root->populate_iter_vars(ivars, act);
 
     //Check what's all the domain
-    for (auto it: idoms) {
-        cout << "OP name: " << it.first->name << endl;
-        cout << "dom bd: " << it.second << endl << endl;
-    }
+    //for (auto it: idoms) {
+    //    cout << "OP name: " << it.first->name << endl;
+    //    cout << "dom bd: " << it.second << endl << endl;
+    //}
 
     for (auto op : vecs) {
-      cout << op.first->name << endl;
+      //cout << op.first->name << endl;
       auto iters = map_find(op.first, ivars);
       auto vars = sep_list(iters, "[", "]", ", ");
 
@@ -1532,6 +1692,12 @@ vector<string> upsample_vars(const std::string& target_buf, op* reader, prog& pr
 
 void make_constant_dd(const std::string& target_op, const std::string& target_buf, prog& prg);
 
+pair<vector<int>, vector<int>> pad_alignment(vector<int>& l, vector<int>& r);
+map<string, vector<int>> align_loop_var_with_pad(op* root, prog& prg);
+pair<vector<int>, vector<int> > aligned_dim_to_pad_dim(
+        vector<int> & p_align_dim,
+        vector<int> & c_align_dim);
+void align_loop_var_with_pad(prog& prg);
 std::vector<string> topologically_sort_kernels(prog& prg);
 std::vector<string> topologically_sort_kernels(op* root, prog& prg);
 
@@ -1541,11 +1707,18 @@ std::set<string> buffers_read(op* p);
 std::set<string> buffers_written(prog& prg);
 std::set<string> buffers_read(prog& prg);
 
+std::set<string> buffers_read_by_kernel(op* loop);
+std::set<string> buffers_written_by_kernel(op* loop);
+std::set<string> kernel_func(op* loop);
+
 bool writes(const std::string& target_buf, op* p);
 
 op* find_writer(const std::string& target_buf, prog& prg);
 
+
+bool is_prod_or_cons(string k_l, string k_r, op* root, prog& prg);
 std::set<string> get_producers(string next_kernel, prog& prg);
+std::set<string> get_producers_outside_SSC(string next_kernel, op* root, prog& prg);
 //in sub ast under root
 std::set<string> get_producers(string next_kernel, op* root, prog& prg);
 
@@ -1574,6 +1747,8 @@ bool compile_regression_tb(prog& prg);
 vector<string> surrounding_vars(op* loop, prog& prg);
 vector<string> surrounding_vars(const std::string& op, prog& prg);
 vector<op*> surrounding_vars_ops(op* loop, prog& prg);
+
+prog extract_cgl_to_separate_prog(const std::set<op*>& cg_loops, prog& original);
 prog extract_group_to_separate_prog(const std::set<std::string>& group, prog& original);
 
 
@@ -1589,7 +1764,7 @@ void get_variable_levels(op* node, map<string,int>& variable_map, int current_le
 map<string, int> get_variable_levels(prog& prg);
 
 std::set<string> all_buffers(prog& prg);
-std::set<op*> find_readers(const string& buff, prog& prg);
+std::set<op*, cmp_op> find_readers(const string& buff, prog& prg);
 
 // std::set<std::set<string>>group_kernels_for_compilation(prog& prg,map<string,int>& kernel_costs,const int max_area_cost_per_group);
 //prog extract_group_to_separate_prog(std::set<std::string>& group, prog& original);
@@ -1618,7 +1793,7 @@ pair<std::string, std::string> remove_whitespace(const pair<std::string, std::st
 std::string remove_whitespace(const std::string& addr);
 piecewise_address remove_whitespace(const piecewise_address& addr);
 
-std::set<op*> find_writers(const string& buff, prog& prg);
+std::set<op*, cmp_op> find_writers(const string& buff, prog& prg);
 
 
 void extend_bounds_to_multiple_of(const int factor, const std::string& buf, prog& prg);
@@ -1698,6 +1873,8 @@ umap* consumer_umap(op* loop, prog& prg);
 isl_map* consumer_map(op* loop, const std::string& b, prog& prg);
 isl_map* producer_map(op* loop, const std::string& b, prog& prg);
 
+int logical_capacity(const std::string& buf, prog& prg);
+
 umap* read_at(const std::string& level, const std::string& buffer, prog& prg);
 umap* read_at(const std::string& level, prog& prg);
 
@@ -1739,16 +1916,49 @@ static
 bool operator==(const resource_instance& a, const resource_instance& b) {
   return a.type == b.type && a.number == b.number;
 }
+struct compute_resource {
+  public:
+    int num_users = 0;
+    int resource_quantity = 0;
+    bool is_created = false;
+    op* leading_op;
+    //string output_name;
+    //string sr_name;
+    //int interleave_dimension = 1; // Loop level where one iteration goes through all kernels (0 being innermost)
+    vector<string> op_names;
+
+    compute_resource(const std::string op_name) {
+        num_users ++;
+        op_names.push_back(op_name);
+    }
+
+    void add_resource(const std::string op_name) {
+        num_users ++;
+        op_names.push_back(op_name);
+    }
+
+};
+
 
 struct schedule_info {
   // Miscellaneous
-  bool use_dse_compute;
-
+  bool use_metamapper;
+  //Memory constraints
+  map<op*, string> buf_write_assignment;
+  map<string, string> buf2level;
+  string dse_compute_filename;
   // Schedule constraints
   map<string, int> buffer_load_latencies;
   map<string, int> buffer_store_latencies;
   map<string, int> compute_unit_latencies;
+  //This data structure save the port loading slack with respect to the largest latency
+  map<string, map<string, int>> port_latencies;
+  //This data is helpful when we decide the input schedule
+  map<string, int> op_latencies;
+
   map<string, string> op_compute_unit_names;
+  //This data structure save the broadcast latency within the interconnect.
+  map<string, vector<int> > ub_latencies;
   //map<string, int> op_compute_unit_latencies;
 
   // Resource constraints
@@ -1757,14 +1967,94 @@ struct schedule_info {
 
   // Resource use info
   map<op*, resource_instance> resource_assignment;
+  map<string, compute_resource> compute_resources;
 
   // Schedule offsets
   map<string, int> loop_iis;
+  //This is the target ii for each inner loop
+  //We need to save it for ii tighten, since some loop cannot support ii=1 due to the fetch width
+  map<string, int> target_inner_iis;
   //map<op*, int> instance_latencies;
-  map<op*, int> op_offset_within_parent;
+  map<string, int> op_offset_within_parent;
+  map<op*, int> op_pad_step;
+
+  int get_op_latency(string name) {
+    if (op_latencies.count(name) == 0) {
+      cout << "Op : " << name << " was not initialized in op latency meta data." << endl;
+    }
+    return op_latencies.at(name);
+  }
+
+  bool check_if_compute_created(op* op) {
+    return compute_resources.at(op->func).is_created;
+  }
+
+  void set_compute_is_created(op* op) {
+    compute_resources.at(op->func).is_created = true;
+    compute_resources.at(op->func).leading_op = op;
+  }
+
+  bool share_compute() {
+    for (auto it: compute_resources) {
+      if (it.second.num_users > 1) {
+        return true;
+      }
+    }
+    return false;
+  }
+
+  bool share_compute(op* op) {
+    return compute_resources.at(op->func).num_users > 1;
+  }
+
+  vector<string> get_shared_resources() {
+    vector<string> ret;
+    for (auto it: compute_resources) {
+      if (it.second.num_users > 1)
+        ret.push_back(it.first);
+    }
+    return ret;
+  }
 
   int compute_latency(const std::string& op_name);
   int compute_latency(op* op);
+
+  int get_compute_inpt_slack(op* op, string buf_name, int pt_cnt) {
+
+    if (op->func == "") {
+      return 0;
+    }
+    if (port_latencies.count(op->func)) {
+      auto port_slack = port_latencies.at(op->func);
+      for (auto it: port_slack) {
+        string pt_name = it.first;
+        string key = buf_name + "_" + str(pt_cnt);
+        if (contains(pt_name, key)) {
+          return it.second;
+        }
+      }
+      return 0;
+    } else {
+      return 0;
+    }
+  }
+
+  int get_ub_latency(string buf, int bank) {
+    if (ub_latencies.count(buf)) {
+      int min_delay = INT_MAX;
+      for (int delay: ub_latencies.at(buf)) {
+        min_delay = std::min(min_delay, delay);
+      }
+      if (ub_latencies.at(buf).size() <= bank) {
+        cout << "bank number: " << bank << endl;
+        cout << ub_latencies.at(buf) << endl;
+      }
+      assert(ub_latencies.at(buf).size() > bank);
+      return ub_latencies.at(buf).at(bank) - min_delay;
+    } else {
+      return 0;
+    }
+  }
 
   int store_latency(const std::string& buf) {
     assert(contains_key(buf, buffer_store_latencies));
@@ -1777,20 +2067,60 @@ struct schedule_info {
   }
 
   int offset_in_parent(op* c) {
-    assert(contains_key(c, op_offset_within_parent));
-    return map_find(c, op_offset_within_parent);
+    assert(contains_key(c->name, op_offset_within_parent));
+    return map_find(c->name, op_offset_within_parent);
+  }
+  int pad_step(op*c) {
+    if (contains_key(c, op_pad_step))
+      return map_find(c, op_pad_step);
+    else
+      return 0;
+  }
+
+  int perfect_loop_update_delay(op* lp) {
+    assert(lp->is_loop());
+    assert(lp->children.size() == 1);
+    auto c = pick(lp->children);
+    if (c->is_loop()) {
+      cout << "child name: " << c->name << endl;
+      cout << "offset_in_parent: " << offset_in_parent(c) << endl;
+      return II(c) * (pad_step(c) + c->trip_count());
+    } else if (c->is_op()) {
+      return offset_in_parent(c) + total_latency(c);
+    } else {
+        cout << "ERROR not implement update delay for this op type" << endl;
+        assert(false);
+        return 0;
+    }
   }
 
   int last_update_delay(op* op) {
     assert(op->is_loop());
     int last_delay = 0;
-    for (auto c : op->children) {
-      int delay = offset_in_parent(c) + total_latency(c);
-      if (delay > last_delay) {
-        last_delay = delay;
+    if (op->children.size() == 1) {
+        return perfect_loop_update_delay(op);
+    } else {
+      for (auto c : op->children) {
+        int delay = offset_in_parent(c) + total_latency(c);
+        if (delay > last_delay) {
+          last_delay = delay;
+        }
       }
+      return last_delay;
     }
-    return last_delay;
+  }
+
+  int starting_delay_to_leaf(op* op) {
+    if (!op->is_loop()) {
+      return offset_in_parent(op);
+    } else {
+      int min_delay = INT_MAX;
+      for (auto c: op->children) {
+        min_delay = std::min(min_delay, starting_delay_to_leaf(c));
+      }
+      return offset_in_parent(op) + min_delay;
+
+    }
   }
 
   //Above the Coarse grained loop, the II will follow the db update delay
@@ -1826,6 +2156,13 @@ struct schedule_info {
     return map_find(op->name, loop_iis);
   }
 
+  void assign_memory_write_resource(CodegenOptions& options, op* op_, string buf) {
+    buf_write_assignment[op_] = buf;
+  }
+
+  void init_op_latencies(prog& prg);
+
+
 };
 
 std::set<string> all_buffers(prog& prg);
@@ -1835,8 +2172,11 @@ int num_read_ports(const std::string& b, prog& prg);
 
 
 bool is_rate_matchable(prog& prg);
+//new method for checking rate match pipeline
+bool is_rate_matchable_loopnest(prog& prg, map<string, vector<int> >& pad_indices);
 
 int loop_depth(op* op);
+vector<int> loop_depth_vector(op* op);
 bool all_loop_nests_same_depth(prog& prg);
 
 bool is_perfect(op* loop, prog& prg);
@@ -1886,7 +2226,33 @@ op* find_coarse_grained_pipeline_loop(op* lp);
 op* find_coarse_grained_pipeline_loop(op* lp, prog& prg);
 void find_coarse_grained_pipeline_loops(op* lp, vector<op*> & cgpl_lps, prog& prg);
 
+//vector<pair<string, pair<string, int> >> determine_output_shift_reg_map(
+//    prog& prg,
+//    UBuffer& buf,
+//    schedule_info& hwinfo);
+//
+//map<string, pair<string, int> > determine_shift_reg_map(
+//        prog& prg,
+//    UBuffer& buf,
+//    schedule_info& hwinfo);
+//
+//dgraph build_out_to_out_shift_register_graph(CodegenOptions& options, prog& prg, UBuffer& buf, schedule_info& hwinfo);
+//dgraph build_shift_register_graph(CodegenOptions& options, prog& prg, UBuffer& buf, schedule_info& hwinfo);
+//dgraph build_in_to_out_shift_register_graph(CodegenOptions& options, prog& prg, UBuffer& buf, schedule_info& hwinfo);
+//dgraph build_shift_registers(CodegenOptions& options, prog& prg, UBuffer& buf, schedule_info& hwinfo);
+//UBufferImpl port_group2bank(CodegenOptions& options, prog& prg, UBuffer& buf, schedule_info& hwinfo);
+
+//isl_map* build_buffer_impl_embarrassing_banking(UBuffer& buf, schedule_info& hwinfo, EmbarrassingBankingImpl& impl);
+
+//void generate_banks_garnet(CodegenOptions& options, UBuffer& buf, UBufferImpl& impl, schedule_info& hw_info);
+
+//UBufferImpl generate_optimized_memory_implementation(
+//        CodegenOptions& options, UBuffer & buf, prog & prg, schedule_info& hwinfo);
+
 void loop_perfection(prog& prg);
+
+void loop_perfection_with_root_op(prog& prg);
+
 void sanity_check_iis(schedule_info& sched);
 
 int logical_dimension(const std::string& buf, prog& prg);
@@ -1905,16 +2271,22 @@ bool all_ops_scheduled(schedule_info& sched, prog& prg);
 int op_latency(op* op, schedule_info& hwinfo);
 
 void adjust_outer_delays(schedule_info& sched, prog& prg);
+void adjust_outer_delays_exhaustively(schedule_info& sched, prog& prg, int glb_load_latency);
 
 void adjust_outer_pipeline_delays(schedule_info& sched, prog& prg);
 
 bool no_violated_cycle_accurate_dependencies(schedule_info& sched, prog& prg);
 bool sw_schedule_respects_deps(umap* schedule, umap* deps);
 bool no_violated_dependencies(umap* schedule, umap* deps);
+bool no_violated_buf_write_port_assignments(CodegenOptions& options, schedule_info& sched, prog& prg);
 
 bool schedule_bounds_fit_controller_bitwidth(const int bitwidth, schedule_info& sched, prog& prg);
 
 void adjust_inner_iis(schedule_info& sched, prog& prg);
+bool check_if_relax_inner_iis(op* lp, prog& prg);
+
+void loop_split(prog& prg);
+void perfect_loop_split(op*, prog& );
 
 void pad_top_level_ops_with_loops(prog& prg);
 void pad_bottom_level_ops_with_loops(prog& prg);
@@ -1922,11 +2294,14 @@ void pad_bottom_level_ops_with_loops(prog& prg);
 int max_loop_depth(prog& prg);
 
 void dsa_writers(prog& prg);
+void dsa_writers_new(prog& prg);
 void dsa_readers(prog& prg);
 
 
 int buffer_store_latency(CodegenOptions& options);
 int buffer_load_latency(CodegenOptions& options);
+int buffer_store_latency(CodegenOptions&, string&);
+int buffer_load_latency(CodegenOptions&, string&);
 
 
 vector<isl_multi_aff*> write_addrs(op* op, const std::string& buf, prog& prg);
@@ -2090,3 +2465,5 @@ std::string perfect_loop_codegen(umap* schedmap);
 umap* clockwork_schedule_prog(prog& prg);
 
 std::vector<std::string> get_kernels_in_order(prog& prg);
+
+int calculate_duty_cycle(op*);

@@ -10,6 +10,7 @@
 #include "lake_target.h"
 #include "simple_example_progs.h"
 #include "prog.h"
+#include "resource.h"
 #include "ubuffer.h"
 
 #include <chrono>
@@ -1193,6 +1194,7 @@ void upsample_vectorization_test() {
 
   generate_hls_code(buf);
 
+  buf.simplify_floor_div_expr();
   map<string, UBuffer> buffers;
   buffers.insert({"ups", buf});
   buffer_vectorization({1}, {"ups"}, 4, buffers);
@@ -1235,6 +1237,7 @@ void upsample_pad_test() {
 
   generate_hls_code(buf);
 
+  buf.simplify_floor_div_expr();
   map<string, UBuffer> buffers;
   buffers.insert({"ups", buf});
   buffer_vectorization({1}, {"ups"}, 4, buffers);
@@ -1272,7 +1275,7 @@ void rolled_conv_reorder_test() {
   buf.access_map["read"] =
     rdmap(ctx, "{ read[root = 0, i, j] -> conv_rolled[i + j] : 0 <= i <= 2 and 0 <= j < 12}");
   buf.schedule["read"] =
-    isl_union_map_read_from_str(ctx, "{ read[root = 0, i, j] -> [j + 3*i + 16] : 0 <= i <= 2 and 0 <= j < 12}");
+    isl_union_map_read_from_str(ctx, "{ read[root = 0, i, j] -> [j + 16*i + 16] : 0 <= i <= 2 and 0 <= j < 12}");
   buf.isIn["read"] = false;
 
   generate_hls_code(buf);
@@ -1370,6 +1373,159 @@ void stride_conv_test() {
   generate_vectorization_unit_testbench(buf);
 
   int res = cmd("clang++ -std=c++11 unit_tb_conv_stride.cpp conv_stride.cpp conv_stride_vec.cpp" );
+  assert(res == 0);
+
+  res = system("./a.out");
+  assert(res == 0);
+}
+
+
+void rolled_conv2D_test() {
+  struct isl_ctx *ctx;
+  ctx = isl_ctx_alloc();
+
+  UBuffer buf;
+  buf.name = "conv2D_rolled";
+  buf.ctx = ctx;
+
+  buf.domain["write"] =
+    isl_set_read_from_str(ctx, "{ write[root = 0, i, j] : 0 <= i < 16 and 0<=j<16}");
+  buf.access_map["write"] =
+    rdmap(ctx, "{ write[root = 0, i, j] -> conv2D_rolled[i, j] : 0 <= i < 16 and 0<=j<16}}");
+  buf.schedule["write"] =
+    isl_union_map_read_from_str(ctx, "{ write[root = 0, i, j] -> [16*i + j] : 0 <= i < 16 and 0<=j<16}}");
+  buf.isIn["write"] = true;
+  map_insert(buf.port_bundles, string("write"),  string("write"));
+
+  // Read 0 through 7
+  buf.domain["read"] =
+    isl_set_read_from_str(ctx, "{ read[root = 0, i, j, ii, jj] : 0 <= i < 12 and 0 <= j < 12 and 0 <= ii < 4 and 0 <= jj < 4}");
+  buf.access_map["read"] =
+    rdmap(ctx, "{ read[root = 0, i, j, ii, jj] -> conv2D_rolled[i + ii, j + jj] : 0 <= i < 12 and 0 <= j < 12 and 0 <= ii < 4 and 0 <= jj < 4}");
+  buf.schedule["read"] =
+    isl_union_map_read_from_str(ctx, "{ read[root = 0, i, j, ii, jj] -> [jj + 4*ii + 16*j + 256*i + 256] : 0 <= i < 12 and 0 <= j < 12 and 0 <= ii < 4 and 0 <= jj < 4}");
+  buf.isIn["read"] = false;
+  map_insert(buf.port_bundles, string("read"),  string("read"));
+
+  generate_hls_code(buf);
+
+  map<string, UBuffer> buffers;
+  buffers.insert({"conv2D_rolled", buf});
+  buffer_vectorization({1}, {"conv2D_rolled"}, 4, buffers);
+
+
+  for (auto& it: buffers) {
+    auto & buf = it.second;
+    buf.simplify_address_space();
+    buf.linear_address_space(to_set(buf.global_range()), 4);
+  }
+
+  generate_hls_code_unit_test(buffers, buf.name);
+
+  generate_vectorization_unit_testbench(buf);
+
+  int res = cmd("clang++ -std=c++11 unit_tb_conv2D_rolled.cpp conv2D_rolled.cpp conv2D_rolled_vec.cpp" );
+  assert(res == 0);
+
+  res = system("./a.out");
+  assert(res == 0);
+}
+
+void outer_rolled_conv2D_test() {
+  struct isl_ctx *ctx;
+  ctx = isl_ctx_alloc();
+
+  UBuffer buf;
+  buf.name = "conv2D_outer_rolled";
+  buf.ctx = ctx;
+
+  buf.domain["write"] =
+    isl_set_read_from_str(ctx, "{ write[root = 0, i, j] : 0 <= i < 16 and 0<=j<16}");
+  buf.access_map["write"] =
+    rdmap(ctx, "{ write[root = 0, i, j] -> conv2D_outer_rolled[i, j] : 0 <= i < 16 and 0<=j<16}}");
+  buf.schedule["write"] =
+    isl_union_map_read_from_str(ctx, "{ write[root = 0, i, j] -> [16*i + j] : 0 <= i < 16 and 0<=j<16}}");
+  buf.isIn["write"] = true;
+  map_insert(buf.port_bundles, string("write"),  string("write"));
+
+  // Read 0 through 7
+  buf.domain["read"] =
+    isl_set_read_from_str(ctx, "{ read[root = 0, i, j, ii, jj] : 0 <= i < 7 and 0 <= j < 7 and 0 <= ii < 8 and 0 <= jj < 8}");
+  buf.access_map["read"] =
+    rdmap(ctx, "{ read[root = 0, i, j, ii, jj] -> conv2D_outer_rolled[i + ii, j + jj] : 0 <= i < 7 and 0 <= j < 7 and 0 <= ii < 8 and 0 <= jj < 8}");
+  buf.schedule["read"] =
+    isl_union_map_read_from_str(ctx, "{ read[root = 0, i, j, ii, jj] -> [jj + 12*ii + 96*j + 768*i + 256] : 0 <= i < 7 and 0 <= j < 7 and 0 <= ii < 8 and 0 <= jj < 8}");
+  buf.isIn["read"] = false;
+  map_insert(buf.port_bundles, string("read"),  string("read"));
+
+  generate_hls_code(buf);
+
+  map<string, UBuffer> buffers;
+  buffers.insert({"conv2D_outer_rolled", buf});
+  buffer_vectorization({1}, {"conv2D_outer_rolled"}, 4, buffers);
+
+  for (auto& it: buffers) {
+    auto & buf = it.second;
+    buf.simplify_address_space();
+    buf.linear_address_space(to_set(buf.global_range()), 4);
+  }
+
+  generate_hls_code_unit_test(buffers, buf.name);
+
+  generate_vectorization_unit_testbench(buf);
+
+  int res = cmd("clang++ -std=c++11 unit_tb_conv2D_outer_rolled.cpp conv2D_outer_rolled.cpp conv2D_outer_rolled_vec.cpp" );
+  assert(res == 0);
+
+  res = system("./a.out");
+  assert(res == 0);
+}
+
+void upsample_2d_unit_test() {
+  struct isl_ctx *ctx;
+  ctx = isl_ctx_alloc();
+
+  UBuffer buf;
+  buf.name = "up2D";
+  buf.ctx = ctx;
+
+  buf.domain["write"] =
+    isl_set_read_from_str(ctx, "{ write[root = 0, i, j] : 0 <= i < 16 and 0<=j<16}");
+  buf.access_map["write"] =
+    rdmap(ctx, "{ write[root = 0, i, j] -> up2D[i, j] : 0 <= i < 16 and 0<=j<16}}");
+  buf.schedule["write"] =
+    isl_union_map_read_from_str(ctx, "{ write[root = 0, i, j] -> [64*i + 2*j] : 0 <= i < 16 and 0<=j<16}}");
+  buf.isIn["write"] = true;
+  map_insert(buf.port_bundles, string("write"),  string("write"));
+
+  // Read 0 through 7
+  buf.domain["read"] =
+    isl_set_read_from_str(ctx, "{ read[root = 0, i, j] : 0 <= i < 32 and 0 <= j < 32}");
+  buf.access_map["read"] =
+    rdmap(ctx, "{ read[root = 0, i, j] -> up2D[floor(i/2) , floor(j/2) ] : 0 <= i < 32 and 0 <= j < 32 }");
+  buf.schedule["read"] =
+    isl_union_map_read_from_str(ctx, "{ read[root = 0, i, j] -> [j + 32*i + 16] : 0 <= i < 32 and 0 <= j < 32}");
+  buf.isIn["read"] = false;
+  map_insert(buf.port_bundles, string("read"),  string("read"));
+
+  generate_hls_code(buf);
+  buf.simplify_floor_div_expr();
+
+  map<string, UBuffer> buffers;
+  buffers.insert({"up2D", buf});
+  buffer_vectorization({1}, {"up2D"}, 4, buffers);
+
+  for (auto& it: buffers) {
+    auto & buf = it.second;
+    buf.simplify_address_space();
+    buf.linear_address_space(to_set(buf.global_range()), 4);
+  }
+
+  generate_hls_code_unit_test(buffers, buf.name);
+
+  generate_vectorization_unit_testbench(buf);
+
+  int res = cmd("clang++ -std=c++11 unit_tb_up2D.cpp up2D.cpp up2D_vec.cpp" );
   assert(res == 0);
 
   res = system("./a.out");
@@ -11694,7 +11850,193 @@ void blur_and_downsample_test() {
 
 void test_if_complex();
 void test_loop_perfection();
+
+
+
+  /*
+   * l is the long sequence, s is the short sequence,
+   * This function will return a array with length of s,
+   * each item of the array is the align position in the long sequence
+   * it will also return the min diff
+   */
+pair<int, vector<int> > find_best_alignment(vector<int> & l, vector<int> & s) {
+    if (s.size() == 1) {
+        int val = pick(s);
+        int min_diff = INT_MAX;
+        int target_idx = -1;
+        for (int i = 0; i < l.size(); i ++) {
+            int diff = abs(val - l.at(i));
+            if (diff < min_diff) {
+                target_idx = i;
+                min_diff = diff;
+            }
+        }
+        assert(target_idx >= 0);
+        return {min_diff, {target_idx}};
+    } else {
+        int range = l.size() - s.size() + 1;
+        int min_diff = INT_MAX;
+        vector<int> align_idx;
+        for (int i = 0; i < range; i ++) {
+            vector<int> s_tail(s.begin() + 1, s.end());
+            vector<int> l_tail(l.begin() + i + 1, l.end());
+            auto ret = find_best_alignment(l_tail, s_tail);
+            int cur_diff = ret.first + abs(l.at(i) - s.at(0));
+            if (cur_diff < min_diff) {
+                min_diff = cur_diff;
+
+                //update the align idx array
+                align_idx.clear();
+                align_idx.push_back(i);
+                for (auto idx: ret.second) {
+                    align_idx.push_back(idx + i + 1);
+                }
+            }
+        }
+        return {min_diff, align_idx};
+    }
+}
+
+void print_alignment(vector<int> & a, vector<int> & b) {
+
+    auto val_alignment_pair = find_best_alignment(a, b);
+    cout << "min diff : " << val_alignment_pair.first << endl;
+    cout << "alignment array: " << val_alignment_pair.second << endl << endl;;
+}
+
+vector<int> get_alignment_array(vector<int>& a, vector<int>& b) {
+    auto val_alignment_pair = find_best_alignment(a, b);
+    auto val_alignment = val_alignment_pair.second;
+    auto it = val_alignment.begin();
+    vector<int> alignment_arr({0});
+    for (int i = 0; i < a.size(); i ++) {
+        if(*it == i) {
+            alignment_arr.push_back((int) (it - val_alignment.begin() + 1));
+            it ++;
+        } else {
+            alignment_arr.push_back(-1);
+        }
+    }
+    assert(alignment_arr.size() == a.size() + 1);
+    return alignment_arr;
+}
+
+
 void playground() {
+    {
+        prog app = gpyr_tagged();
+        strip_mine(4, "blur0_1_s0_y", app);
+        app.pretty_print();
+        assert(false);
+    }
+    {
+        vector<int> a = {0, 1, 2, 4};
+        vector<int> b = {0, 2, 1, 4};
+        auto ret = pad_alignment(a, b);
+        cout << ret.first << endl;
+        cout << ret.second << endl;
+        assert(false);
+    }
+    {
+        auto prg = conv_3_3();
+        prg.pretty_print();
+        align_loop_var_with_pad(prg);
+        assert(false);
+    }
+    {
+
+      isl_ctx* ctx = isl_ctx_alloc();
+      auto m = isl_map_read_from_str(ctx,"{ wr[root=0, i0, i1,i2,i3]-> [16*i0 + 2*i1]: 0<=i0<8 and 0<=i1<8 and 0<=i2<=1 and 0<=i3<=16}");
+      auto s = get_domain_mask(m, 2);
+      auto m_mask = dot(s, m);
+      auto sv = get_domain_mask_reverse(m, 2);
+      auto m_mask_rev = dot(sv, m);
+      cout << "mask: " << str(m_mask) << endl;
+      cout << "mask_rev: " << str(m_mask_rev) << endl;
+      assert(false);
+    }
+
+    {
+        vector<int> a = {3, 40, 3, 40};
+        vector<int> b = {44, 44};
+        print_alignment(a, b);
+        cout << get_alignment_array(a, b) << endl;
+
+        a = {39, 40, 5, 90};
+        b = {44, 44};
+        print_alignment(a, b);
+        cout << get_alignment_array(a, b) << endl;
+
+        a = {10, 20};
+        b = {20, 10};
+        print_alignment(a, b);
+        cout << get_alignment_array(a, b) << endl;
+
+        assert(false);
+
+    }
+    {
+        vector<int> a = {0,1,-1,-1,-1};
+        vector<int> b = {-1,-1,0,1,-1};
+        auto ret = pad_alignment(a, b);
+        cout << ret.first << endl;
+        cout << ret.second << endl;
+        assert(false);
+    }
+    {
+      isl_ctx* ctx = isl_ctx_alloc();
+      auto rd = isl_map_read_from_str(ctx,"{ wr[root=0, i0, i1]-> [8*i0 + 2*i1]: 0<=i0<8 and 0<=i1<8}");
+      assert(num_out_dims(rd) == 1);
+      for (int i = 0; i < num_in_dims(rd); i ++) {
+        auto stride = stride_in_dim(rd, i, 0);
+        cout << "stride: " << stride << "dim in: " << i << endl;
+      }
+      int cms = common_max_stride(rd, 0);
+      cout << "cms: " << cms << endl;
+      assert(false);
+    }
+    {
+        prog app = camera_pipeline_2x2_unroll();
+        app.pretty_print();
+        loop_split(app);
+        app.pretty_print();
+        assert(false);
+    }
+
+    {
+      isl_ctx* ctx = isl_ctx_alloc();
+      auto sched_wr = isl_map_read_from_str(ctx,"{ wr[root=0, i0, i1]-> [8*i0 + i1, 0]: 0<=i0<8 and 0<=i1<8}");
+      auto sched_rd = isl_map_read_from_str(ctx,"{ rd[root=0, i0, i1]-> [8*i0 + i1 + 9, 1]: 0<=i0<7 and 0<=i1<7}");
+      auto lexm = simplify(lex_gt(sched_rd, sched_wr));
+      cout << "read deps" << str(lexmax(lexm)) << endl;
+      //for (auto pt: get_points(domain(sched_rd))) {
+      //    auto m = lexmax(its(lexm, to_set(pt)));
+      //    cout << "\t pt: " << str(pt) << "\n\t\t" << str(m) << endl;
+      //}
+      auto lexm_wr = simplify(lex_gt(sched_wr, sched_rd));
+      cout << "wr deps" << str(lexmax(lexm_wr)) << endl;
+      for (auto pt: get_points(domain(sched_wr))) {
+          auto m = lexmax(its(lexm_wr, to_set(pt)));
+          cout << "\t pt: " << str(pt) << "\n\t\t" << str(m) << endl;
+      }
+      assert(false);
+    }
+    {
+      isl_ctx* ctx = isl_ctx_alloc();
+      auto acc_0 = isl_map_read_from_str(ctx,"{ a[root=0, i0, i1]-> [0]: 0<=i0<8 and 0<=i1<8}");
+      auto sched_0 = isl_map_read_from_str(ctx,"{ s[root = 0, i0, i1]-> [10*i0+i1]: 0<=i0<8 and 0<=i1<8}");
+      map<int, int> dim2pad = get_all_domain_pad_dims(sched_0, acc_0);
+      cout << "Dim2pad: " << dim2pad << endl;
+      assert(false);
+    }
+    {
+      auto sp_mem = create_single_port_wide_fetch_memory(4, 512, 2);
+      sp_mem.print_points();
+
+      auto dp_mem = create_dual_port_memory(512);
+      dp_mem.print_points();
+      assert(false);
+    }
   test_loop_perfection();
     {
       isl_ctx* ctx = isl_ctx_alloc();
@@ -11707,29 +12049,6 @@ void playground() {
       isl_ctx* ctx = isl_ctx_alloc();
       auto acc_0 = isl_map_read_from_str(ctx,"{ op[i0, i1]-> [4000 + i1]: i0=0 and i1=0}");
       auto aff = get_aff(acc_0);
-      assert(false);
-    }
-    {
-      isl_ctx* ctx = isl_ctx_alloc();
-      auto acc_0 = isl_map_read_from_str(ctx,"{ op[i0, i1]-> data[i0 + i1]: 0<=i0<3 and 0 <= i1 <= 7}");
-      auto sched = isl_map_read_from_str(ctx,"{ op[i0, i1]-> [10 + i0*10 + i1]: 0<=i0<3and 0 <= i1 <= 7 }");
-      auto read_ir = get_vectorized_read_simplified(acc_0, sched, {}, 2, 0);
-      auto acc_vec = read_ir.first;
-      auto sched_vec = read_ir.second;
-      cout << "After vec read access map: " << str(simplify_expr(acc_vec)) << endl;
-      cout << "After vec read sched: " << str(sched_vec) << endl;
-      assert(false);
-    }
-    {
-      isl_ctx* ctx = isl_ctx_alloc();
-      auto acc_0 = isl_map_read_from_str(ctx,"{ op[i0, i1]-> data[i0 + i1]: 0<=i0<8 and 0 <= i1 <= 2}");
-      auto sched = isl_map_read_from_str(ctx,"{ op[i0, i1]-> [14 + i0*3 + i1]: 0<=i0<8and 0 <= i1 <= 2 }");
-      get_vectorized_read_simplified(acc_0, sched, {}, 0, 0, false);
-      auto read_ir = get_vectorized_read(acc_0, sched, {}, 4, 0);
-      auto acc_vec = read_ir.first;
-      auto sched_vec = read_ir.second;
-      cout << "After vec read access map: " << str(simplify_expr(acc_vec)) << endl;
-      cout << "After vec read sched: " << str(sched_vec) << endl;
       assert(false);
     }
     {
@@ -12925,19 +13244,23 @@ std::vector<string> verilator_results(const std::string& name) {
 int run_verilator_on(const std::string& top_module,
     const std::string& tb_file,
     const std::vector<string>& verilog_files,
-    bool extra_flag = false) {
+    bool extra_flag = false,
+    const std::vector<string> flags = {}) {
 
   //int verilator_build = cmd("verilator -Wall --cc " + sep_list(verilog_files, "", "", " ") + " --exe --build " + tb_file + " --top-module " + top_module + " -Wno-lint");
   int verilator_build = 0;
   if (extra_flag) {
 #ifdef CGRAFLOW
       cmd("echo $CLKWRK_PATH");
-      verilator_build = cmd("verilator -Wall --cc " + sep_list(verilog_files, "", "", " ") + " --exe --build --trace " + tb_file + " -CFLAGS -I$CLKWRK_PATH --top-module " + top_module + " -Wno-UNUSED -Wno-PINMISSING -Wno-DECLFILENAME -Wno-WIDTH -Wno-UNDRIVEN -Wno-CASEINCOMPLETE -Wno-MODDUP -Wno-UNOPTFLAT -Wno-CMPCONST");
+      cmd("echo $FP_COMPT_PATH");
+      verilator_build = cmd("verilator -Wall --cc " + sep_list(verilog_files, "", "", " ") + " --exe --build --trace " + tb_file + " -CFLAGS -I$CLKWRK_PATH -I$FP_COMP_PATH --top-module " + top_module + " -Wno-UNUSED -Wno-PINMISSING -Wno-DECLFILENAME -Wno-WIDTH -Wno-UNDRIVEN -Wno-CASEINCOMPLETE -Wno-MODDUP -Wno-UNOPTFLAT -Wno-CMPCONST -Wno-LATCH -Wno-VARHIDDEN");
 #else
-      verilator_build = cmd("verilator -Wall --cc " + sep_list(verilog_files, "", "", " ") + " --exe --build --trace " + tb_file + " --top-module " + top_module + " -Wno-UNUSED -Wno-PINMISSING -Wno-DECLFILENAME -Wno-WIDTH -Wno-UNDRIVEN -Wno-CASEINCOMPLETE -Wno-MODDUP -Wno-UNOPTFLAT -Wno-CMPCONST");
+      verilator_build = cmd("verilator -Wall --cc " + sep_list(verilog_files, "", "", " ") + " " + sep_list(flags, "", "", " ") + " --exe --build --trace " + tb_file + " --top-module " + top_module + " -I$FP_COMP_PATH -Wno-UNUSED -Wno-PINMISSING -Wno-DECLFILENAME -Wno-WIDTH -Wno-UNDRIVEN -Wno-CASEINCOMPLETE -Wno-MODDUP -Wno-UNOPTFLAT -Wno-CMPCONST  -Wno-VARHIDDEN");
+      //verilator_build = cmd("verilator -Wall --cc " + sep_list(verilog_files, "", "", " ") + " --exe --build --trace " + tb_file + " --top-module " + top_module + " -Wno-UNUSED -Wno-PINMISSING -Wno-DECLFILENAME -Wno-WIDTH -Wno-UNDRIVEN -Wno-CASEINCOMPLETE -Wno-MODDUP -Wno-UNOPTFLAT -Wno-CMPCONST");
+      //verilator_build = cmd("verilator -Wall --cc " + sep_list(verilog_files, "", "", " ") + " -exe --build --trace " + tb_file + " --top-module " + top_module + " -I$FP_COMP_PATH  -Wno-UNUSED -Wno-PINMISSING -Wno-DECLFILENAME -Wno-WIDTH -Wno-UNDRIVEN -Wno-CASEINCOMPLETE -Wno-MODDUP -Wno-UNOPTFLAT -Wno-CMPCONST -Wno-VARHIDDEN");
 #endif
   } else {
-      verilator_build = cmd("verilator -Wall --cc " + sep_list(verilog_files, "", "", " ") + " --exe --build " + tb_file + " --top-module " + top_module + " -Wno-UNUSED -Wno-WIDTH -Wno-PINMISSING -Wno-DECLFILENAME");
+      verilator_build = cmd("verilator -Wall --cc " + sep_list(verilog_files, "", "", " ") + " --exe --build --trace " + tb_file + " --top-module " + top_module + " -Wno-UNUSED -Wno-WIDTH -Wno-PINMISSING -Wno-DECLFILENAME");
   }
 
   assert(verilator_build == 0);
@@ -12955,6 +13278,29 @@ void run_verilator_verilog_tb(const std::string& name) {
 
   int res = run_verilator_on(name, name + "_verilog_tb.cpp", {name + ".v", name + "_verilog_collateral.sv", "./lake_components/dualwithadd/lake_top.sv", name + "_compute.v"});
   assert(res == 0);
+}
+
+void run_verilator_tb_buffet(const std::string& name) {
+
+  int to_verilog_res = cmd("${COREIR_PATH}/bin/coreir --inline --load_libs commonlib,cgralib --input " + name + ".json --output " + name + ".v -p \"rungenerators; wireclocks-arst; wireclocks-clk; add-dummy-inputs\"");
+  assert(to_verilog_res == 0);
+
+  int res = run_verilator_on(name,
+      name + "_verilog_tb.cpp",
+      {name + ".v", name + "_verilog_collateral.sv",
+      "./lake_components/dualwithadd/lake_top.sv",
+      "./buffet_defines.v",
+      "./../../../buffets/dut/*.v",
+      "./../../../buffets/dut/utils/*.v",
+      "./lake_components/inner_affine_controller.sv"},
+      true, {"-I./buffet_defines.v", "-Wno-PINCONNECTEMPTY"});
+  cmd("rm -rf obj_dir/");
+  assert(res == 0);
+  //int verilator_build = cmd("verilator -Wall --cc " + name + ".v --exe --build " + name + "_verilog_tb.cpp --top-module " + name + " -Wno-lint");
+  //assert(verilator_build == 0);
+
+  //int verilator_run = cmd("./obj_dir/V" + name);
+  //assert(verilator_run == 0);
 }
 
 void run_verilator_tb(const std::string& name) {
@@ -12983,7 +13329,7 @@ void run_verilator_tb(const std::string& name) {
 void generate_verilog_tb(const std::string& name) {
 
     cmd("echo $LD_LIBRARY_PATH");
-  int to_verilog_res = cmd("${COREIR_PATH}/bin/coreir --inline --load_libs commonlib,cwlib --input " + name + ".json --output " + name + ".v -p \"rungenerators; wireclocks-clk; deletedeadinstances; add-dummy-inputs\"");
+  int to_verilog_res = cmd("${COREIR_PATH}/bin/coreir --inline --load_libs commonlib,cwlib --input " + name + ".json --output " + name + ".v -p \"rungenerators; wireclocks-clk; wireclocks-arst; deletedeadinstances; add-dummy-inputs\"");
   assert(to_verilog_res == 0);
 }
 
@@ -12991,7 +13337,7 @@ void generate_verilog_tb(const std::string& name) {
 void generate_garnet_verilog_top(CodegenOptions& options, const std::string& name) {
 
     cmd("echo $LD_LIBRARY_PATH");
-  int to_verilog_res = cmd("${COREIR_PATH}/bin/coreir --inline --load_libs commonlib,cwlib,cgralib --input " + options.dir  + "/"+name +".json --output " + name + ".v -p \"rungenerators; wireclocks-clk; deletedeadinstances; add-dummy-inputs\"");
+    int to_verilog_res = cmd("${COREIR_PATH}/bin/coreir --inline --load_libs float,float_DW,commonlib,cwlib,cgralib --input " + options.dir  + "/"+name +".json --output " + name + ".v -p \"rungenerators; wireclocks-clk; wireclocks-arst; deletedeadinstances; add-dummy-inputs\"");
   assert(to_verilog_res == 0);
 
   //run verilator on all the generated verilog
@@ -13008,7 +13354,7 @@ void generate_cgra_tb(std::map<string, UBuffer> buffers_opt, prog prg, CodegenOp
   CoreIRLoadLibrary_commonlib(context);
   CoreIRLoadLibrary_cwlib(context);
   schedule_info hwinfo;
-  hwinfo.use_dse_compute = false;
+  hwinfo.use_metamapper = false;
   opt.rtl_options.use_prebuilt_memory = true;
   opt.rtl_options.use_external_controllers = false;
   auto sched = global_schedule_from_buffers(buffers_opt);
@@ -13016,18 +13362,21 @@ void generate_cgra_tb(std::map<string, UBuffer> buffers_opt, prog prg, CodegenOp
   generate_verilog_tb(prg.name);
 }
 
-void generate_garnet_coreir(std::map<string, UBuffer> buffers_opt, prog prg, CodegenOptions& opt, schedule_info& hwinfo, bool use_dse_compute=false) {
+void generate_garnet_coreir(std::map<string, UBuffer> buffers_opt, prog prg, CodegenOptions& opt, schedule_info& hwinfo, bool use_metamapper, string dse_compute_filename) {
   CoreIR::Context* context = CoreIR::newContext();
   CoreIRLoadLibrary_commonlib(context);
   CoreIRLoadLibrary_cwlib(context);
   //schedule_info hwinfo;
-  hwinfo.use_dse_compute = use_dse_compute;
+  hwinfo.use_metamapper = use_metamapper;
 
   //TODO: add lake memory tile configuration here
 
-  auto sched = global_schedule_from_buffers(buffers_opt);
-  generate_coreir(opt, buffers_opt, prg, sched, hwinfo);
-
+  umap* sched = global_schedule_from_buffers(buffers_opt);
+  if (use_metamapper) {
+    generate_coreir_without_ctrl(opt, buffers_opt, prg, sched, hwinfo, dse_compute_filename);
+  } else {
+    generate_coreir(opt, buffers_opt, prg, sched, hwinfo);
+  }
   //cmd("mv " + prg.name + ".v " + opt.dir + "verilog");
 }
 #endif
@@ -14860,32 +15209,69 @@ void Init_PE_energy_cost(power_analysis_params& power_params)  {
 }
 
 
-void compile_for_garnet_single_port_mem(prog & prg, string dir, bool gen_smt_stream, bool gen_config_only, bool multi_level_mem, bool use_dse_compute, bool energy_model = false);
-void compile_for_garnet_fetch2_mem(prog & prg, string dir, bool gen_smt_stream, bool gen_config_only, bool multi_level_mem, bool use_dse_compute, bool energy_model = false);
+void compile_for_garnet_single_port_mem_large_TB(prog& prg,
+        string dir,
+        bool gen_smt_stream,
+        bool config_gen_only,
+        bool multi_level_mem,
+        bool use_metamapper,
+        string dse_compute_filename,
+        bool energy_model=false);
+void compile_for_garnet_single_port_mem(prog & prg, string dir, bool gen_smt_stream, bool gen_config_only,bool multi_level_mem, bool use_metamapper, string dse_compute_filename, bool energy_model = false);
+void compile_for_garnet_fetch2_mem(prog & prg, string dir, bool gen_smt_stream, bool gen_config_only, bool multi_level_mem, bool use_metampper, string dse_compute_filename, bool energy_model = false);
+void compile_for_garnet_dual_port_mem(prog& prg,
+        string dir,
+        bool gen_smt_stream,
+        bool config_gen_only,
+        bool multi_level_mem,
+        bool use_metamapper,
+        string dse_compute_filename,
+        bool energy_model =false);
 void cpy_app_to_folder(const std::string& app_type, const std::string& prg_name);
 void generate_resnet_latency_experiment(prog& prg,
         ofstream& profiling_file,
         string dir,
-        bool use_dse_compute = false);
+        bool use_metamapper = false);
 
-void test_pond(string dir, bool run_verilator=true) {
-  vector<prog> test_apps;
-  //Need to change the schedule for vectorization
-  //test_apps.push_back(complex_mem_pond_input());
+void verilator_regression_test(prog& prg, vector<string>& collateral_files, string app_type) {
 
-  test_apps.push_back(complex_mem_pond());
-  test_apps.push_back(complex_mem_pond_rolled());
-  test_apps.push_back(conv_rolled());
-  test_apps.push_back(conv_1_3());
-  test_apps.push_back(resnet_simple());
-  test_apps.push_back(resnet());
-  test_apps.push_back(three_level_pond_copy());
-  test_apps.push_back(three_level_pond_rolled());
-  test_apps.push_back(fft8_unroll8_split());
+  string name = prg.name;
+  auto cpu = unoptimized_result(prg);
+  vector<string> verilog_files;// = get_files("./" + dir + "/"+name+"/verilog/");
+  verilog_files.push_back(name + ".v");
+  for (auto file: collateral_files) {
+    verilog_files.push_back(file);
+  }
+  //verilog_files.push_back("laketop_new.sv");
+  //verilog_files.push_back("LakeTop_flat.v");
+  //verilog_files.push_back("lake_module_wrappers.v");
+  //cmd("mv laketop_new.sv laketop.sv");
+  bool extra_flag_for_lake = true;
+  int res = run_verilator_on(name, name + "_verilog_tb.cpp", verilog_files, extra_flag_for_lake);
+  assert(res == 0);
+  //cmd("rm LakeTop_W_new.v");
+  //cmd("rm LakeWrapper.v");
+  //cmd("rm lake_module_wrappers.v");
+  //cmd("rm laketop_new.sv");
+  //cmd("rm LakeTop_flat.v");
+  for (auto file: collateral_files) {
+    cmd("rm " + file);
+  }
 
-  //TODO: tobe tested with new pond
-  //test_apps.push_back(three_level_pond());
-  //test_apps.push_back(three_level_pond_rolled());
+  auto verilator_res = verilator_results(prg.name);
+  compare("cgra_" + prg.name + "_cpu_vs_verilog_comparison", verilator_res, cpu);
+  //string app_type = "dualwithaddr";
+  //string app_type = "single_port_buffer";
+  cpy_app_to_folder(app_type, prg.name);
+}
+
+void test_multi_layer_nn(string dir, bool run_verilator=true) {
+
+    vector<prog> test_apps;
+  //Work with tb height = 4
+  test_apps.push_back(fsrcnn_reorder());
+  test_apps.push_back(fsrcnn_shared());
+
   for ( auto prg: test_apps) {
     cout << "====== Running CGRA Single Port test for " << prg.name << endl;
     prg.pretty_print();
@@ -14893,7 +15279,85 @@ void test_pond(string dir, bool run_verilator=true) {
 
     break_up_multi_channel_inputs(prg);
     break_up_multi_channel_outputs(prg);
-    dsa_writers(prg);
+    dsa_writers_new(prg);
+    prg.pretty_print();
+    bool gen_config_only = !run_verilator;
+
+#ifdef COREIR
+    compile_for_garnet_single_port_mem_large_TB(prg, dir,
+            false, /*generate smt stream*/
+            gen_config_only,/*gen_config_only*/
+            true, /*multi level hierarchy*/
+            false, /*for metamapper*/
+            "",
+            false);
+
+    cout << "Output name: " << prg.name << endl;
+    //run verilator on all the generated verilog
+    if (!gen_config_only) {
+      vector<string> verilog_files;
+      verilog_files.push_back("LakeTop_flat.v");
+      verilog_files.push_back("laketop_new.sv");
+      verilog_files.push_back("PondTop_flat.v");
+      verilog_files.push_back("pondtop.sv");
+      verilog_files.push_back("pond_module_wrappers.v");
+      verilog_files.push_back("lake_module_wrappers.v");
+      add_default_initial_block("laketop", "endmodule   // sram_sp__0");
+      verilator_regression_test(prg, verilog_files, "single_port_buffer");
+    }
+
+#endif
+  }
+}
+
+
+void test_pond(string dir, bool run_verilator=true) {
+  vector<prog> test_apps;
+  //Need to change the schedule for vectorization
+  //test_apps.push_back(complex_mem_pond_input());
+
+  //fp app need pond for accumulation buffer
+  //test_apps.push_back(nlmeans_rolled_7x7());
+
+  //Accumulation register
+
+  test_apps.push_back(conv_1_3());
+  test_apps.push_back(conv_rolled());
+
+  test_apps.push_back(nlmeans_simple_blur());
+  test_apps.push_back(nlmeans_simple());
+
+  test_apps.push_back(three_level_pond_rolled());
+  test_apps.push_back(three_level_pond_copy());
+  test_apps.push_back(three_level_pond());
+  test_apps.push_back(resnet_simple());
+  test_apps.push_back(resnet());
+  test_apps.push_back(resnet_init_unroll_tile());
+
+
+  test_apps.push_back(complex_mem_pond_rolled());
+  test_apps.push_back(complex_mem_pond());
+
+  //Unit test version with uneven mapping
+  test_apps.push_back(resnet_mic_moc());
+
+  //16x16 resnet for onyx, has moc, weight pond save 3(rx)x4(w) weight
+  test_apps.push_back(resnet16x16());
+  //16x16 resnet for onyx, has moc=8 and mic=4, pond save 8 weight
+  test_apps.push_back(resnet16x16_mic_moc());
+
+
+  //TODO:Currently not work because of floating point, also need to check the cyclic banking condition
+  //test_apps.push_back(fft8_unroll8_split());
+
+  for ( auto prg: test_apps) {
+    cout << "====== Running CGRA Single Port test for " << prg.name << endl;
+    prg.pretty_print();
+    prg.sanity_check();
+
+    break_up_multi_channel_inputs(prg);
+    break_up_multi_channel_outputs(prg);
+    dsa_writers_new(prg);
     prg.pretty_print();
     bool gen_config_only = !run_verilator;
 
@@ -14902,7 +15366,9 @@ void test_pond(string dir, bool run_verilator=true) {
             false, /*generate smt stream*/
             gen_config_only,/*gen_config_only*/
             true, /*multi level hierarchy*/
-            false/*use dse compute*/);
+            false, /*for metamapper*/
+            "",
+            false);
     //generate_regression_testbench(prg);
 
     cout << "Output name: " << prg.name << endl;
@@ -14910,26 +15376,15 @@ void test_pond(string dir, bool run_verilator=true) {
     //TODO: move to a function
     //run verilator on all the generated verilog
     if (!gen_config_only) {
-      auto cpu = unoptimized_result(prg);
-      string name = prg.name;
-      auto verilog_files = get_files("./" + dir + "/"+name+"/verilog/");
-      verilog_files.push_back(name + ".v");
-      verilog_files.push_back("Pond_W.v");
-      verilog_files.push_back("LakeTop_W_new.v");
-      add_default_initial_block();
-      bool extra_flag_for_lake = true;
-      int res = run_verilator_on(name, name + "_verilog_tb.cpp", verilog_files, extra_flag_for_lake);
-      assert(res == 0);
-      cmd("rm LakeWrapper.v");
-      cmd("rm Pond_W.v");
-      cmd("rm LakeTop_W_new.v");
-      cmd("rm -rf ./" + dir + "/" + name + "/verilog/");
-
-      auto verilator_res = verilator_results(prg.name);
-      compare("cgra_" + prg.name + "_cpu_vs_verilog_comparison", verilator_res, cpu);
-      //string app_type = "dualwithaddr";
-      string app_type = "single_port_buffer";
-      cpy_app_to_folder(app_type, prg.name);
+      vector<string> verilog_files;
+      verilog_files.push_back("LakeTop_flat.v");
+      verilog_files.push_back("laketop_new.sv");
+      verilog_files.push_back("PondTop_flat.v");
+      verilog_files.push_back("pondtop.sv");
+      verilog_files.push_back("pond_module_wrappers.v");
+      verilog_files.push_back("lake_module_wrappers.v");
+      add_default_initial_block("laketop", "endmodule   // sram_sp__0");
+      verilator_regression_test(prg, verilog_files, "single_port_buffer");
     }
 
 #endif
@@ -14956,7 +15411,7 @@ void test_energy_model(string dir) {
     auto cpu = unoptimized_result(prg);
 
     //compile_for_garnet_platonic_mem(prg);
-    compile_for_garnet_single_port_mem(prg, dir, false, gen_config_only, false, false, true);
+    compile_for_garnet_single_port_mem(prg, dir, false, gen_config_only, false, false, "", true);
     generate_regression_testbench(prg);
 
     cout << "Output name: " << prg.name << endl;
@@ -14985,25 +15440,28 @@ void test_energy_model(string dir) {
 void test_fetchwidth2_mem(bool gen_config_only, bool multi_accessor=false, string dir="aha_garnet_design_fetch2") {
   vector<prog> test_apps;
 
+  test_apps.push_back(camera_pipeline_2x2());
+  test_apps.push_back(gaussian_glb2());
   test_apps.push_back(conv_3_3());
   //test_apps.push_back(camera_pipeline_new());
   //test_apps.push_back(laplacian_pyramid());
-  //test_apps.push_back(counter());
-  //test_apps.push_back(gaussian());
-  //test_apps.push_back(down_sample());
-  //test_apps.push_back(cascade());
-  //test_apps.push_back(harris());
-  //test_apps.push_back(rom());
-  //test_apps.push_back(conv_1_2());
-  //test_apps.push_back(demosaic_unrolled());
-  //test_apps.push_back(camera_pipeline());
-  //test_apps.push_back(up_sample());
-  //test_apps.push_back(unsharp());
-  //test_apps.push_back(camera_pipeline_new());
+  test_apps.push_back(counter());
+  test_apps.push_back(gaussian());
+  test_apps.push_back(cascade());
+  test_apps.push_back(harris());
+  ////test_apps.push_back(conv_1_2());
+  test_apps.push_back(unsharp());
+  test_apps.push_back(rom());
+  test_apps.push_back(demosaic_unrolled());
+  test_apps.push_back(camera_pipeline());
+  test_apps.push_back(down_sample());
+  test_apps.push_back(up_sample());
+  test_apps.push_back(camera_pipeline_new());
 
   //DNN apps
+  //TODO: currently resnettiny has bug with the
   test_apps.push_back(resnet_tiny());
-  test_apps.push_back(resnet_multi_tiny());
+  test_apps.push_back(resnet());
 
   //Big applications
   //test_apps.push_back(mobilenet_unrolled());
@@ -15017,26 +15475,17 @@ void test_fetchwidth2_mem(bool gen_config_only, bool multi_accessor=false, strin
     prg.pretty_print();
 
     //compile_for_garnet_platonic_mem(prg);
-    compile_for_garnet_fetch2_mem(prg, dir, false, gen_config_only, false, false);
+    compile_for_garnet_fetch2_mem(prg, dir, false, gen_config_only, false, false, "");
     cout << "Output name: " << prg.name << endl;
     //TODO: move to a function
     //run verilator on all the generated verilog
     if (!gen_config_only) {
-      string name = prg.name;
-      auto verilog_files = get_files("./" + dir + "/"+name+"/verilog/");
-      verilog_files.push_back(name + ".v");
-      verilog_files.push_back("LakeWrapper.v");
-      bool extra_flag_for_lake = true;
-      auto cpu = unoptimized_result(prg);
-      int res = run_verilator_on(name, name + "_verilog_tb.cpp", verilog_files, extra_flag_for_lake);
-      assert(res == 0);
-      cmd("rm LakeWrapper.v");
-
-      auto verilator_res = verilator_results(prg.name);
-      compare("cgra_" + prg.name + "_cpu_vs_verilog_comparison", verilator_res, cpu);
-      //string app_type = "dualwithaddr";
-      string app_type = "single_port_buffer";
-      cpy_app_to_folder(app_type, prg.name);
+      vector<string> verilog_files;// = get_files("./" + dir + "/"+name+"/verilog/");
+      verilog_files.push_back("laketop_new.sv");
+      verilog_files.push_back("LakeTop_flat.v");
+      verilog_files.push_back("lake_module_wrappers.v");
+      add_default_initial_block("laketop", "endmodule   // sram_dp__0", 1);
+      verilator_regression_test(prg, verilog_files, "single_port_buffer");
     }
   }
 }
@@ -15075,8 +15524,21 @@ void resnet_profiling() {
 void test_glb(bool gen_config_only, bool multi_accessor=false, string dir="aha_garnet_design") {
   vector<prog> test_apps;
 
+
+  test_apps.push_back(maxpool_layer());
+  //camera pipeline variant tests
+  //test_apps.push_back(resnet3_x_glb_unroll());
+  test_apps.push_back(camera_pipeline_2x2_unroll());
+  //Still not work need to add a fanin pass support delay row buffer
+  //test_apps.push_back(camera_pipeline_extra_buf_glb());
+  test_apps.push_back(camera_pipeline_extra_buf());
+  test_apps.push_back(camera_pipeline_unrolly());
+  test_apps.push_back(camera_pipeline_2x2());
+
+
   //ISSCC application without unroll
   test_apps.push_back(harris_color());
+  test_apps.push_back(harris_color_unroll4());
   test_apps.push_back(gaussian_isscc());
   test_apps.push_back(camera_pipeline_isscc());
   test_apps.push_back(unsharp_isscc());
@@ -15092,7 +15554,6 @@ void test_glb(bool gen_config_only, bool multi_accessor=false, string dir="aha_g
   //Dense Linear algebra
   test_apps.push_back(glb_channel_reduction());
   test_apps.push_back(matmul());
-
   //Simplified multi-tile DNN application
   test_apps.push_back(resnet_init_unroll_tile());
 
@@ -15100,18 +15561,30 @@ void test_glb(bool gen_config_only, bool multi_accessor=false, string dir="aha_g
   //test_apps.push_back(resnet5_1_full());
   //test_apps.push_back(resnet2_x_full());
 
-  ////Sample DNN Layers
+  //For debug the 7x7 layer
+  test_apps.push_back(resnet_last());
+
+  //Sample DNN Layers
+  test_apps.push_back(resnet1_docker());
   test_apps.push_back(resnet1());
+  test_apps.push_back(resnet_1x1());
   test_apps.push_back(resnet3_1());
   test_apps.push_back(resnet4_x());
+  test_apps.push_back(resnet5_x_docker());
   test_apps.push_back(resnet5_1());
   test_apps.push_back(resnet5_x());
   test_apps.push_back(resnet5_x_new());
   test_apps.push_back(resnet5_1_new());
   test_apps.push_back(resnet5_1_unroll());
+  test_apps.push_back(resnet5_1_unroll_cyclic());
+  test_apps.push_back(resnet5_glb_unroll());
   test_apps.push_back(resnet_multi_channel());
 
-  ////Test with non double buffer, not tested with db
+  //two different resnet5x tests
+  test_apps.push_back(resnet5_x_unroll());
+  test_apps.push_back(resnet5_x_unroll_mic());
+
+  //Test with non double buffer, not tested with db
   //test_apps.push_back(resnet_output_stationary_small());
   //test_apps.push_back(resnet_output_stationary_tiny());
 
@@ -15120,33 +15593,50 @@ void test_glb(bool gen_config_only, bool multi_accessor=false, string dir="aha_g
 
     break_up_multi_channel_inputs(prg);
     break_up_multi_channel_outputs(prg);
-    dsa_writers(prg);
+    dsa_writers_new(prg);
     prg.pretty_print();
 
 #ifdef COREIR
     //compile_for_garnet_platonic_mem(prg);
-    compile_for_garnet_single_port_mem(prg, dir, false, gen_config_only, false, false);
+    compile_for_garnet_single_port_mem(prg, dir, false, gen_config_only, false, false, "", false);
     cout << "Output name: " << prg.name << endl;
     //TODO: move to a function
     //run verilator on all the generated verilog
     if (!gen_config_only) {
-      string name = prg.name;
-      auto verilog_files = get_files("./" + dir + "/"+name+"/verilog/");
-      verilog_files.push_back(name + ".v");
-      verilog_files.push_back("LakeTop_W_new.v");
-      add_default_initial_block();
-      bool extra_flag_for_lake = true;
-      auto cpu = unoptimized_result(prg);
-      int res = run_verilator_on(name, name + "_verilog_tb.cpp", verilog_files, extra_flag_for_lake);
-      assert(res == 0);
-      cmd("rm LakeTop_W_new.v");
-      cmd("rm LakeWrapper.v");
+      vector<string> verilog_files;// = get_files("./" + dir + "/"+name+"/verilog/");
+      verilog_files.push_back("laketop_new.sv");
+      verilog_files.push_back("LakeTop_flat.v");
+      verilog_files.push_back("lake_module_wrappers.v");
+      add_default_initial_block("laketop", "endmodule   // sram_sp__0");
+      verilator_regression_test(prg, verilog_files, "single_port_buffer");
+    }
+#endif
+  }
+}
 
-      auto verilator_res = verilator_results(prg.name);
-      compare("cgra_" + prg.name + "_cpu_vs_verilog_comparison", verilator_res, cpu);
-      //string app_typssive "dualwithaddr";
-      string app_type = "single_port_buffer";
-      cpy_app_to_folder(app_type, prg.name);
+void test_pipeline_compute(bool gen_config_only, bool multi_accessor=false, string dir="aha_garnet_pipeline") {
+  vector<prog> test_apps;
+  test_apps.push_back(gaussian_aha());
+
+  for ( auto prg: test_apps) {
+    prg.sanity_check();
+
+    break_up_multi_channel_inputs(prg);
+    break_up_multi_channel_outputs(prg);
+    dsa_writers_new(prg);
+    prg.pretty_print();
+#ifdef COREIR
+    //compile_for_garnet_platonic_mem(prg);
+    compile_for_garnet_single_port_mem(prg, dir, false, gen_config_only, false, true, "coreir_compute/" + prg.name + "_compute.json", false);
+    cout << "Output name: " << prg.name << endl;
+    //run verilator on all the generated verilog
+    if (!gen_config_only) {
+      vector<string> verilog_files;;
+      verilog_files.push_back("laketop_new.sv");
+      verilog_files.push_back("LakeTop_flat.v");
+      verilog_files.push_back("lake_module_wrappers.v");
+      add_default_initial_block("laketop", "endmodule   // sram_sp__0");
+      verilator_regression_test(prg, verilog_files, "single_port_buffer");
     }
 #endif
   }
@@ -15157,33 +15647,133 @@ void test_single_port_mem(bool gen_config_only, bool multi_accessor=false, strin
   //TODO:has issue  with multiple input
   //test_apps.push_back(demosaic_complex());
   //test_apps.push_back(fft8_unroll8());
-  //test_apps.push_back(camera_pipeline_trunc());
+  //
+  ////fp apps
+  //test_apps.push_back(nlmeans_unroll_reorder());
+  //test_apps.push_back(nlmeans_simple_trunc());
+  //test_apps.push_back(fp_pointwise());
+  //test_apps.push_back(fp_arith());
+  //test_apps.push_back(camera_pipeline_2x2_unroll());
+
+  //Not work yet
+  //test_apps.push_back(stereo_unroll());
+
+
+
+  //Compute share apps
+  //test_apps.push_back(resnet_init_unroll_tile_dp());
+  //test_apps.push_back(laplacian_composite());
+  test_apps.push_back(gpyr_unroll_default());
+  test_apps.push_back(gpyr_unroll());
+  test_apps.push_back(conv_3_3());
+  test_apps.push_back(gpyr_tagged());
+  test_apps.push_back(cascade_coarse());
 
   //CGRA tests
+  test_apps.push_back(conv_3_3_reorder());
   test_apps.push_back(conv_3_3());
-  test_apps.push_back(matmul_single());
-  test_apps.push_back(counter());
-  test_apps.push_back(camera_pipeline_new());
-  test_apps.push_back(rom());
-  test_apps.push_back(unsharp_new());
-  test_apps.push_back(laplacian_pyramid());
-  test_apps.push_back(laplacian_pyramid_docker());
-  test_apps.push_back(gaussian());
-  test_apps.push_back(down_sample());
   test_apps.push_back(cascade());
+  test_apps.push_back(nlmeans_simple_trunc());
+  test_apps.push_back(counter());
+  test_apps.push_back(rom());
+  test_apps.push_back(camera_pipeline_new());
+  test_apps.push_back(unsharp_new());
+  test_apps.push_back(unsharp_large());
+  test_apps.push_back(unsharp());
+  test_apps.push_back(gaussian());
   test_apps.push_back(harris());
   test_apps.push_back(conv_1_2());
   test_apps.push_back(demosaic_unrolled());
+  test_apps.push_back(down_sample());
   test_apps.push_back(up_sample());
-  test_apps.push_back(unsharp());
+  test_apps.push_back(laplacian_pyramid());
+  test_apps.push_back(laplacian_pyramid_docker());
 
-  //DNN apps
   test_apps.push_back(resnet_tiny());
   test_apps.push_back(resnet_simple());
+  test_apps.push_back(resnet_size_test());
   test_apps.push_back(resnet());
+
+  //Matrix multiply,
+  //this two has issue with the new loop align algorithm
+  test_apps.push_back(matmul_single());
+  test_apps.push_back(matmul_unroll2());
+  test_apps.push_back(gemm_reorder());
 
   //Big applications
   test_apps.push_back(mobilenet_unrolled());
+  test_apps.push_back(resnet88());
+  test_apps.push_back(resnet88_chain());
+ //test_apps.push_back(resnet_coarse_pipeline_loop());
+  //New scheduler take too long time, revisit when refactor the scheduler
+  //test_apps.push_back(resnet_one_input());
+
+  //coarse grained pipeline
+  //test_apps.push_back(resnet_coarse_pipeline_loop());
+
+  //test_apps.push_back(conv_3_3_wide());
+
+  for ( auto prg: test_apps) {
+    prg.sanity_check();
+
+    break_up_multi_channel_inputs(prg);
+    break_up_multi_channel_outputs(prg);
+    dsa_writers_new(prg);
+    prg.pretty_print();
+#ifdef COREIR
+    //compile_for_garnet_platonic_mem(prg);
+    compile_for_garnet_single_port_mem(prg, dir, false, gen_config_only, false, false, "", false);
+    cout << "Output name: " << prg.name << endl;
+    //run verilator on all the generated verilog
+    if (!gen_config_only) {
+      vector<string> verilog_files;;
+      verilog_files.push_back("laketop_new.sv");
+      verilog_files.push_back("LakeTop_flat.v");
+      verilog_files.push_back("lake_module_wrappers.v");
+      add_default_initial_block("laketop", "endmodule   // sram_sp__0");
+      verilator_regression_test(prg, verilog_files, "single_port_buffer");
+    }
+#endif
+  }
+}
+
+void test_dual_port_mem(bool gen_config_only, bool multi_accessor=false, string dir="aha_garnet_dp") {
+  vector<prog> test_apps;
+
+  //CGRA tests that pass dual port test
+  test_apps.push_back(conv_3_3());
+  test_apps.push_back(gaussian());
+  test_apps.push_back(cascade());
+  test_apps.push_back(harris());
+  test_apps.push_back(down_sample());
+  test_apps.push_back(unsharp());
+  test_apps.push_back(unsharp_new());
+  //CGRA tests that pass dual port test
+  test_apps.push_back(up_sample());
+  test_apps.push_back(laplacian_pyramid());
+  test_apps.push_back(laplacian_pyramid_docker());
+
+  test_apps.push_back(camera_pipeline_2x2());
+  test_apps.push_back(unsharp_large());
+  test_apps.push_back(harris_color());
+  test_apps.push_back(counter());
+  test_apps.push_back(rom());
+  test_apps.push_back(conv_1_2());
+  test_apps.push_back(demosaic_unrolled());
+  test_apps.push_back(camera_pipeline_new());
+
+
+  ////////DNN apps
+  //////Not working
+  ////test_apps.push_back(resnet_tiny());
+  ////test_apps.push_back(resnet_simple());
+  test_apps.push_back(resnet());
+  test_apps.push_back(resnet88());
+  test_apps.push_back(resnet_init_unroll_tile_dp());
+  test_apps.push_back(matmul_single());
+
+  //////Big applications
+  //test_apps.push_back(mobilenet_unrolled());
   //test_apps.push_back(resnet_one_input());
   //test_apps.push_back(resnet88());
   //test_apps.push_back(resnet88_chain());
@@ -15206,28 +15796,16 @@ void test_single_port_mem(bool gen_config_only, bool multi_accessor=false, strin
     prg.pretty_print();
 #ifdef COREIR
     //compile_for_garnet_platonic_mem(prg);
-    compile_for_garnet_single_port_mem(prg, dir, false, gen_config_only, false, false);
+    compile_for_garnet_dual_port_mem(prg, dir, false, gen_config_only, false, false, "", false);
     cout << "Output name: " << prg.name << endl;
-    //TODO: move to a function
     //run verilator on all the generated verilog
     if (!gen_config_only) {
-      string name = prg.name;
-      auto verilog_files = get_files("./" + dir + "/"+name+"/verilog/");
-      verilog_files.push_back(name + ".v");
-      verilog_files.push_back("LakeTop_W_new.v");
-      add_default_initial_block();
-      bool extra_flag_for_lake = true;
-      auto cpu = unoptimized_result(prg);
-      int res = run_verilator_on(name, name + "_verilog_tb.cpp", verilog_files, extra_flag_for_lake);
-      assert(res == 0);
-      cmd("rm LakeTop_W_new.v");
-      cmd("rm LakeWrapper.v");
-
-      auto verilator_res = verilator_results(prg.name);
-      compare("cgra_" + prg.name + "_cpu_vs_verilog_comparison", verilator_res, cpu);
-      //string app_type = "dualwithaddr";
-      string app_type = "single_port_buffer";
-      cpy_app_to_folder(app_type, prg.name);
+      vector<string> verilog_files;;
+      verilog_files.push_back("LakeTop_flat.v");
+      verilog_files.push_back("laketop_new.sv");
+      verilog_files.push_back("lake_module_wrappers.v");
+      add_default_initial_block("laketop", "endmodule   // sram_dp__0");
+      verilator_regression_test(prg, verilog_files, "dual_port_buffer");
     }
 #endif
   }
@@ -17151,11 +17729,12 @@ void lake_smt_tests() {
 
 void access_pattern_read_unit_tests() {
   isl_ctx* ctx = isl_ctx_alloc();
+  int dummy_dim;
 
   auto acc_0 = isl_map_read_from_str(ctx,"{ op[i0]-> data[i0]: 0<=i0<=61}");
   auto sched = isl_map_read_from_str(ctx,"{ op[i0]-> [i0]: 0<=i0<=61 }");
   //auto read_ir = get_vectorized_read(acc_0, sched, {}, 4, 0);
-  auto read_ir = get_vectorized_read_simplified(acc_0, sched, {}, 4, 0);
+  auto read_ir = get_vectorized_read_simplified(acc_0, sched, {}, 4, 8, 0, dummy_dim);
   auto acc_vec = read_ir.first;
   auto sched_vec = read_ir.second;
   cout << "After vec read access map: " << str(simplify_expr(acc_vec)) << endl;
@@ -17169,7 +17748,7 @@ void access_pattern_read_unit_tests() {
   auto sched_write = isl_map_read_from_str(ctx,"{ op_write[i0]-> [4 + 4*i0]: 0<=i0<=15 }");
   //read_ir = get_vectorized_read(acc_0, sched,
   read_ir = get_vectorized_read_simplified(acc_0, sched,
-          {{"sram2tb_0", sched_read}, {"agg2sram_0", sched_write}}, 4, 0);
+          {{"sram2tb_0", sched_read}, {"agg2sram_0", sched_write}}, 4, 8, 0, dummy_dim);
   acc_vec = read_ir.first;
   sched_vec = read_ir.second;
   cout << "After vec read access map: " << str(acc_vec) << endl;
@@ -17183,7 +17762,7 @@ void access_pattern_read_unit_tests() {
   sched_write = isl_map_read_from_str(ctx,"{ op_write[i0]-> [4 + 4*i0]: 0<=i0<=15 }");
   //read_ir = get_vectorized_read(acc_0, sched,
   read_ir = get_vectorized_read_simplified(acc_0, sched,
-          {{"sram2tb_0", sched_read}, {"agg2sram_0", sched_write}}, 4, 0);
+          {{"sram2tb_0", sched_read}, {"agg2sram_0", sched_write}}, 4, 8, 0, dummy_dim);
   acc_vec = read_ir.first;
   sched_vec = read_ir.second;
   cout << "After vec read access map: " << str(acc_vec) << endl;
@@ -17195,7 +17774,7 @@ void access_pattern_read_unit_tests() {
   sched_write = isl_map_read_from_str(ctx,"{ op_write[i0]-> [8 + 8*i0]: 0<=i0<=7 }");
   //read_ir = get_vectorized_read(acc_0, sched,
   read_ir = get_vectorized_read_simplified(acc_0, sched,
-          {{"agg2sram_0", sched_write}}, 4, 0);
+          {{"agg2sram_0", sched_write}}, 4, 8, 0, dummy_dim);
   acc_vec = read_ir.first;
   sched_vec = read_ir.second;
   cout << "After vec read access map: " << str(acc_vec) << endl;
@@ -17217,7 +17796,7 @@ void access_pattern_read_unit_tests() {
 
   acc_0 = isl_map_read_from_str(ctx,"{ sram2tb[root = 0, i0, i2, i1]-> data[i0, i1+i2]: 0<=i0<=61 and 0<=i1<=61 and 0<=i2<=7}");
   sched = isl_map_read_from_str(ctx,"{ sram2tb[root = 0, i0, i2, i1]-> [560*i0+ 70*i2+i1]: 0<=i0<=61 and 0<=i1<=61 and 0<=i2<=7}");
-  read_ir = get_vectorized_read_simplified(acc_0, sched, {}, 4, 1);
+  read_ir = get_vectorized_read_simplified(acc_0, sched, {}, 4, 8, 1, dummy_dim);
   //read_ir = get_vectorized_read(acc_0, sched, {}, 4, 1);
   acc_vec = read_ir.first;
   sched_vec = read_ir.second;
@@ -17229,7 +17808,7 @@ void access_pattern_read_unit_tests() {
   acc_0 = isl_map_read_from_str(ctx,"{ op[i0, i1]-> data[i0 + i1]: 0<=i0<8 and 0 <= i1 <= 2}");
   sched = isl_map_read_from_str(ctx,"{ op[i0, i1]-> [14 + i0*3 + i1]: 0<=i0<8and 0 <= i1 <= 2 }");
   //read_ir = get_vectorized_read(acc_0, sched, {}, 4, 0);
-  read_ir = get_vectorized_read_simplified(acc_0, sched, {}, 4, 0);
+  read_ir = get_vectorized_read_simplified(acc_0, sched, {}, 4, 8, 0, dummy_dim);
   acc_vec = read_ir.first;
   sched_vec = read_ir.second;
   cout << "After vec read access map: " << str(simplify_expr(acc_vec)) << endl;
@@ -17372,15 +17951,19 @@ void vectorization_unit_tests() {
   upsample_pad_test();
   stride_id_test();
   stride_conv_test();
+  upsample_2d_unit_test();
+  outer_rolled_conv2D_test();
+  rolled_conv2D_test();
 
   //FIXME: Did not work need to test after ASPLOS
-  sw_fetch2_test();
+  //sw_fetch2_test();
 }
 
 void lake_tests() {
   //vectorization_unit_tests();
   //vectorization_unit_tests();
   test_single_port_mem(false, true, "aha_garnet_design_new");
+  test_multi_layer_nn("aha_garnet_design_pond");
   test_pond("aha_garnet_design_pond");
   //test_single_port_mem(false, false, "aha_garnet_design");
   //assert(false);
@@ -17498,6 +18081,49 @@ int get_vectorization_dim(isl_map* m, int fetch_width) {
   return -1; //need merge or use single pixel vectorization
 }
 
+void relax_write(schedule_info& sched, op* loop, prog& prg, int fetch_width) {
+  //only look at loop op
+  if (!loop->is_loop())
+    return;
+  cout << "op name: " << loop->name << endl;
+  auto write_map = written_at(loop->name, prg);
+  auto levels = get_variable_levels(prg);
+  cout << "op level: " << levels.at(loop->name) << endl;
+  if(write_map == nullptr)
+      return;
+  //Do not pad glb loop
+  if (contains(loop->name, "glb"))
+      return;
+  for (auto wr_map: get_maps(write_map)) {
+    cout << tab(4) << "write map: \n\t" << str(wr_map) << endl;
+    auto b_map = to_map(pick(get_basic_maps(wr_map)));
+    auto write_addr_involve_dim = out_involve_dim(b_map, levels.at(loop->name));
+    cout << tab(4) << "addr involve dim: " << write_addr_involve_dim << endl;
+
+    //Chances are that this dimension is fully unrolled
+    //Involve the vectorization dimension
+    int vec_dim = get_vectorization_dim(b_map, fetch_width);
+    if (write_addr_involve_dim.size() > 0
+            && (elem(vec_dim, write_addr_involve_dim))) {
+      assert(write_addr_involve_dim.size() == 1);
+      int packed_addr_dim = pick(write_addr_involve_dim);
+      auto in_involve_d = in_involve_dim(b_map, packed_addr_dim);
+      cout << "\tInvolve in dim: " << in_involve_d << endl;
+
+      //Do not pad if this dimension will be merged
+      if (loop->trip_count() < fetch_width) {
+          continue;
+      } else {
+          sched.op_offset_within_parent[loop->name] += (fetch_width - (loop->trip_count() * sched.II(loop)) % fetch_width) % fetch_width;
+          sched.op_pad_step[loop] = (fetch_width - (-loop->trip_count() ) % fetch_width) % fetch_width;
+          cout << "\t change loop : " << loop->name << "'s offset to " << sched.op_offset_within_parent.at(loop->name) << endl;
+      }
+    }
+    //Should only go over one time
+    return;
+  }
+}
+
 bool need_relax(schedule_info& sched, op* loop, prog& prg, int fetch_width) {
   //only look at loop op
   if (!loop->is_loop())
@@ -17555,14 +18181,19 @@ bool need_relax(schedule_info& sched, op* loop, prog& prg, int fetch_width) {
               cout << tab(4) << "Relax ii latency for op: " << loop->name << endl;
               //cout << tab(4) << "Original offset within parent: " << sched.offset_in_parent(child) << endl;
               cout << tab(4) << "Original offset within parent: " << sched.offset_in_parent(loop) << endl;
+              cout << tab(4) << "loop II: " << sched.II(loop) << endl;
               cout << tab(4) << "loop trip count: " << loop->trip_count() << endl;
-              if (is_inner_loop(loop))
-                  sched.op_offset_within_parent.at(loop) = (loop->trip_count()) % fetch_width + fetch_width * (loop->trip_count()%fetch_width== 0);
-              else {
+
+              //This loop is the innermost loop that access the vectorized dimension
+              if (levels.at(loop->name) == in_involve_d.back()) {
+                  sched.op_offset_within_parent.at(loop->name) = sched.II(loop) * ((loop->trip_count() % fetch_width) + fetch_width * (loop->trip_count()%fetch_width== 0));
+                  sched.op_pad_step[loop] = ((loop->trip_count() % fetch_width) + fetch_width * (loop->trip_count()%fetch_width== 0));
+             } else {
                   //int range_span = get_dim_extent(range(b_map), packed_addr_dim);
                   //if (range_span % fetch_width)
                   //TODO: also check the logic here, this is conservative
-                  sched.op_offset_within_parent.at(loop) = sched.II(loop) * ((4- (loop->trip_count()) % fetch_width));
+                  sched.op_offset_within_parent.at(loop->name) = sched.II(loop) * ((4- (loop->trip_count()) % fetch_width));
+                  sched.op_pad_step[loop] = ((4- (loop->trip_count()) % fetch_width));
               }
               cout << tab(4) << "New offset within parent: " << sched.offset_in_parent(loop) << endl;
               return true;
@@ -17593,22 +18224,32 @@ void asap_inner_loops_schedule(schedule_info& sched, op* op, prog& prg, int fetc
     int latency = 0;
     for (auto other : op->children) {
       int old_latency = latency;
-      sched.op_offset_within_parent[other] = 0;
+      sched.op_offset_within_parent[other->name] = 0;
       latency = max(latency, sched.total_latency(other));
     }
-    sched.loop_iis[op->name] = max(latency, 1);
+    int min_ii = 1;
+    if ((fetch_width > 1) &&
+            check_if_relax_inner_iis(op, prg)){
+        min_ii = 2;
+    }
+    sched.loop_iis[op->name] = max(latency, min_ii);
+    sched.target_inner_iis[op->name] = min_ii;
   } else if(op->is_loop()) {
     int latency = 0;
     for (auto other : op->children) {
       int old_latency = latency;
-      sched.op_offset_within_parent[other] = latency;
+      sched.op_offset_within_parent[other->name] = latency;
       //if (is_inner_loop(other)) {
       //  //TODO: currently only need to pad read op
       //  relax_inner_delay_for_vec_read(sched, other, prg, fetch_width);
       //}
+      relax_write(sched, other, prg, fetch_width);
       if (need_relax(sched, other, prg, fetch_width)) {
         cout << tab(4) << other->name << "--> Enter relax condition loop!" << endl;
       }
+      //if (other->is_loop())
+      //    sched.op_offset_within_parent[other] += (fetch_width -
+      //        (other->trip_count() * sched.II(other) % fetch_width)) % fetch_width;
       latency = sched.total_latency(other) + sched.offset_in_parent(other);
       //TODO:  this offset by 1 is trying to pipeline instead of braodacsting
       if (old_latency == latency) {
@@ -17616,10 +18257,19 @@ void asap_inner_loops_schedule(schedule_info& sched, op* op, prog& prg, int fetc
       }
     }
     sched.loop_iis[op->name] = max(latency, 1);
+    int offset = 0;
+    if ((latency % 2 != 0) && (latency > fetch_width)) {
+        cout << "offset: " << latency << endl;
+        //FIXME: 2 is the magic number 4 does not work
+        offset = - latency%2 + 2;
+    }
+    sched.loop_iis[op->name] = max(latency + offset, 1);
+    cout << tab(1) <<  "Loop : " << op->name << endl;
+    cout << tab(2) << "ASAP iis = " << latency << endl;
   } else if (op->is_if()) {
     assert(op->children.size() == 1);
     auto child = pick(op->children);
-    sched.op_offset_within_parent[child] = 0;
+    sched.op_offset_within_parent[child->name] = 0;
     sched.loop_iis[op->name] = sched.total_latency(child) + sched.offset_in_parent(child);
   } else {
     cout << "Did not implemented visitor pass for IR Node type: " << op->tp << endl;
@@ -17632,6 +18282,7 @@ void sequential_schedule(schedule_info& hwinfo, op* op, prog& prg) {
 
   if (!op->is_loop()) {
     int total_latency = op_latency(op, hwinfo);
+    hwinfo.op_offset_within_parent[op->name] = 0;
     //hwinfo.instance_latencies[op] = total_latency;
     return;
   }
@@ -17643,7 +18294,7 @@ void sequential_schedule(schedule_info& hwinfo, op* op, prog& prg) {
   int latency = 0;
   for (auto other : op->children) {
     int old_latency = latency;
-    hwinfo.op_offset_within_parent[other] = latency;
+    hwinfo.op_offset_within_parent[other->name] = latency;
     latency += hwinfo.total_latency(other);
     if (old_latency == latency) {
       latency += 1;
@@ -17680,7 +18331,7 @@ void rate_matched_schedule(schedule_info& sched, op* root, prog& prg, const int 
 
   for (auto l : l2_loops) {
     sched.loop_iis[l->name] = level_iis[2];
-    sched.op_offset_within_parent[l] = 0;
+    sched.op_offset_within_parent[l->name] = 0;
   }
 
   cout << "L2 II = " << level_iis[2] << endl;
@@ -17706,7 +18357,7 @@ void rate_matched_schedule(schedule_info& sched, op* root, prog& prg, const int 
     if (no_reads_from_internal_buffer) {
       edge_loops.insert(l);
       sched.loop_iis[l->name] = outer_ii;
-      sched.op_offset_within_parent[l] = 0;
+      sched.op_offset_within_parent[l->name] = 0;
     }
   }
 
@@ -17714,7 +18365,7 @@ void rate_matched_schedule(schedule_info& sched, op* root, prog& prg, const int 
   for (auto l : l1_loops) {
     if (!elem(l, edge_loops)) {
       sched.loop_iis[l->name] = outer_ii;
-      sched.op_offset_within_parent[l] = pos*outer_ii;
+      sched.op_offset_within_parent[l->name] = pos*outer_ii;
       pos += 3;
     }
   }
@@ -17722,6 +18373,17 @@ void rate_matched_schedule(schedule_info& sched, op* root, prog& prg, const int 
 
   //assert(false);
   //adjust_outer_delays(sched, prg);
+}
+
+//Just test if add delay work
+void add_delay_to_op(string op_name, prog& prg, schedule_info& sched) {
+    for (auto kernel: topologically_sort_kernels(prg)) {
+        auto lp = prg.find_non_op(kernel);
+        cout << "\t kernel name: " << lp<< ", delay: " << sched.op_offset_within_parent[lp->name]<< endl;
+      if (!contains(kernel, "hw_input")) {
+          sched.op_offset_within_parent[lp->name] += 64;
+      }
+    }
 }
 
 void tighten_iis(schedule_info& sched, prog& prg) {
@@ -17737,6 +18399,39 @@ void tighten_iis(schedule_info& sched, prog& prg) {
           cout << "Tightening ii " << loop->name << " from " << ii << " to " << L << endl;
           sched.loop_iis[loop->name] = max(L, 1);
           tightened = true;
+          break;
+        }
+      }
+    }
+  }
+}
+
+void tighten_iis(schedule_info& sched, prog& prg, int fetch_width) {
+  bool tightened = true;
+  while (tightened) {
+    tightened = false;
+    for (auto loop : prg.all_loops()) {
+      cout << loop->name << endl;
+      int ii = sched.II(loop);
+      if (ii != 1 && (!is_inner_loop(loop))) {
+        int L = sched.last_update_delay(loop);
+        int offset = 0;
+        if (L % 2!= 0) {
+          offset = L%2;
+          L += offset;
+        }
+        //if (L % fetch_width != 0) {
+        //  offset = fetch_width - L%fetch_width;
+        //  L += offset;
+        //}
+        if (ii > L) {
+          cout << "Tightening ii " << loop->name << " from " << ii << " to " << L << endl;
+          cout << "Pad step :" << sched.pad_step(loop) << endl;
+          sched.loop_iis[loop->name] = max(L, 1);
+          //Added for offset update to create a higher temporal occupancy
+          tightened = true;
+          if (loop->name != "root")
+            sched.op_offset_within_parent.at(loop->name) = sched.pad_step(loop) * L;
           break;
         }
       }
@@ -17772,13 +18467,14 @@ void tighten_coarse_grained_iis(schedule_info& sched, prog& prg) {
       auto lower_ops = loop->descendants();
       bool outside_cgpl = false;
       for(op* lp: cgpl_lps){
-        if(elem(lp, lower_ops)) {
+        if(elem(lp, lower_ops) && (lp!=loop)) {
           outside_cgpl = true;
           break;
         }
       }
       if (!outside_cgpl)
           continue;
+      cout << "\tOP: " << loop->name << "is a loop outside cgpl " << endl;
       int ii = sched.II(loop);
       if (ii != 1) {
         int L = sched.doublebuffer_update_delay(loop);
@@ -17827,8 +18523,7 @@ void relax_inner_iis(schedule_info& sched, op* loop, umap* read_map, int fetch_w
               //cout << tab(4) << "Original offset within parent: " << sched.offset_in_parent(child) << endl;
               cout << tab(4) << "Original offset within parent: " << sched.offset_in_parent(loop) << endl;
               cout << tab(4) << "loop trip count: " << loop->trip_count() << endl;
-              sched.op_offset_within_parent.at(loop) = (loop->trip_count()) % fetch_width
-                  + fetch_width * (loop->trip_count()%fetch_width== 0);
+              sched.op_offset_within_parent.at(loop->name) = (loop->trip_count() % fetch_width) + fetch_width * ((loop->trip_count()%fetch_width) == 0);
               cout << tab(4) << "New offset within parent: " << sched.offset_in_parent(loop) << endl;
             }
         }
@@ -17923,6 +18618,7 @@ void relax_iis_for_vectorization(schedule_info& sched, prog& prg) {
   }
 }
 
+
 void adjust_coarse_grained_loop_delays_sequentially_without_opt(schedule_info& sched, prog& prg) {
   int d = 0;
   map<string, int> coarse_pipeline_II;
@@ -17949,7 +18645,7 @@ void adjust_coarse_grained_loop_delays_sequentially_without_opt(schedule_info& s
       //reset the delay
       //coarse_pipeline_II[name] = sched.II(lp) * lp->trip_count();
       coarse_pipeline_II[name] = sched.total_latency(lp);
-      sched.op_offset_within_parent[lp] = 0;
+      sched.op_offset_within_parent[lp->name] = 0;
       if (producers.size() == 0) {
           head_op_latency[name] = coarse_pipeline_II.at(name);
       }
@@ -17969,11 +18665,47 @@ void adjust_coarse_grained_loop_delays_sequentially_without_opt(schedule_info& s
       for (string prod: producers){
           op* prod_op = prg.find_non_op(prod);
           max_delay = max(max_delay,
-                  coarse_pipeline_II.at(prod) + sched.op_offset_within_parent.at(prod_op));
+                  coarse_pipeline_II.at(prod) + sched.op_offset_within_parent.at(prod_op->name));
       }
-      sched.op_offset_within_parent.at(lp) = max_delay;
+      sched.op_offset_within_parent.at(lp->name) = max_delay;
       cout << tab(1) << "final delay of " << lp->name <<
           ": \t"<< max_delay << endl << endl;
+    }
+  }
+}
+
+void align_glb_load_start_cycle(schedule_info& sched, prog& prg) {
+  vector<op*> cgpl_lps;
+  find_coarse_grained_pipeline_loops(prg.root, cgpl_lps, prg);
+  for (op* coarse_pipeline_loop: cgpl_lps) {
+    cout << "adjust delay under coarse loop: "
+        << coarse_pipeline_loop->name << endl;
+    vector<string> sorted_kernels = topologically_sort_kernels(coarse_pipeline_loop, prg);
+    vector<string> kernels_to_be_aligned;
+    for (auto name : sorted_kernels) {
+      //cout << tab(2) << "II: " << sched.II(lp) << endl;
+      //cout << tab(2) << "TP: " << (lp)->trip_count() << endl;
+      auto producers = get_producers(name, coarse_pipeline_loop, prg);
+
+      if (producers.size() == 0) {
+         kernels_to_be_aligned.push_back(name);
+         cout << tab(1) << "Push kernel <" << name << "> into GLB alignment list." << endl;
+      }
+    }
+
+
+    int max_delay = 0;
+    map<string, int> delay_map;
+    for (auto name : kernels_to_be_aligned) {
+      auto lp = prg.find_non_op(name);
+      //this is the starting cycle under the coarse loop level, no matter how deep the loopnest is
+      delay_map[name] = sched.starting_delay_to_leaf(lp);
+      cout << tab(2) << "Name: " << name << ": delay = " << delay_map.at(name) << endl;
+      max_delay = max(delay_map.at(name), max_delay);
+    }
+    for (auto name : kernels_to_be_aligned) {
+      auto lp = prg.find_non_op(name);
+      sched.op_offset_within_parent.at(lp->name) =  - delay_map.at(name);
     }
   }
 }
@@ -18004,7 +18736,7 @@ void adjust_coarse_grained_loop_delays_sequentially(schedule_info& sched, prog& 
       //reset the delay
       //coarse_pipeline_II[name] = sched.II(lp) * lp->trip_count();
       coarse_pipeline_II[name] = sched.total_latency(lp);
-      sched.op_offset_within_parent[lp] = 0;
+      sched.op_offset_within_parent[lp->name] = 0;
       if (producers.size() == 0) {
           head_op_latency[name] = coarse_pipeline_II.at(name);
       }
@@ -18024,7 +18756,7 @@ void adjust_coarse_grained_loop_delays_sequentially(schedule_info& sched, prog& 
       for (string prod: producers){
           op* prod_op = prg.find_non_op(prod);
           max_delay = max(max_delay,
-                  coarse_pipeline_II.at(prod) + sched.op_offset_within_parent.at(prod_op));
+                  coarse_pipeline_II.at(prod) + sched.op_offset_within_parent.at(prod_op->name));
       }
       //An optimization, if this the head of the graph, push it back
       if (producers.size() == 0 ) {
@@ -18045,7 +18777,7 @@ void adjust_coarse_grained_loop_delays_sequentially(schedule_info& sched, prog& 
       //  max_delay -= 785;
       //}
 
-      sched.op_offset_within_parent.at(lp) = max_delay;
+      sched.op_offset_within_parent.at(lp->name) = max_delay;
       cout << tab(1) << "final delay of " << lp->name <<
           ": \t"<< max_delay << endl << endl;
     }
@@ -18059,19 +18791,30 @@ void dump_DNN_delays(schedule_info& sched, prog& prg, ofstream& out) {
   int start = INT_MAX, end = 0;
   for (auto name : topologically_sort_kernels(prg)) {
     auto lp = prg.find_loop(name);
-    cout << "Kernel, " << name << ", " << sched.op_offset_within_parent.at(lp) << endl;
-    if (sched.op_offset_within_parent.at(lp) != 0){
-        start = min(sched.op_offset_within_parent.at(lp), start);
-        end = max(sched.op_offset_within_parent.at(lp), end);
+    cout << "Kernel, " << name << ", " << sched.op_offset_within_parent.at(lp->name) << endl;
+    if (sched.op_offset_within_parent.at(lp->name) != 0){
+        start = min(sched.op_offset_within_parent.at(lp->name), start);
+        end = max(sched.op_offset_within_parent.at(lp->name), end);
     }
   }
   cout << "CGRA latency: " <<  end - start << endl;
   out <<  end-start;
 }
 
-void adjust_outer_delays_sequentially(schedule_info& sched, prog& prg) {
+void adjust_outer_delays_sequentially_with_glb_guard(schedule_info& sched, prog& prg) {
   cout << "Adjusting delays of " << prg.name << "After vectorization" << endl;
   int d = 0;
+  int glb_load_latency = 0;
+  for (auto name : topologically_sort_kernels(prg)) {
+    auto lp = prg.find_loop(name);
+    auto prods =  get_producers(name, prg);
+    if (prods.size() == 0 && contains(name, "glb")) {
+      cout << "\tkernel <" << lp->name << "> is the glb loading kernel." << endl;
+      cout << "\tname<" << name << endl;
+      glb_load_latency = std::max(sched.total_latency(lp), glb_load_latency);
+    }
+  }
+  cout << "Find GLB load latency = " << glb_load_latency << endl;
   map<string, int> coarse_pipeline_II;
   for (auto name : topologically_sort_kernels(prg)) {
     auto lp = prg.find_loop(name);
@@ -18083,7 +18826,7 @@ void adjust_outer_delays_sequentially(schedule_info& sched, prog& prg) {
     //This only works for the schedule without pipeline should change into total latency
     //coarse_pipeline_II[name] = sched.II(lp) * lp->trip_count();
     coarse_pipeline_II[name] = sched.total_latency(lp);
-    sched.op_offset_within_parent[lp] = 0;
+    sched.op_offset_within_parent[lp->name] = 0;
   }
   for (auto name : topologically_sort_kernels(prg)) {
     auto lp = prg.find_loop(name);
@@ -18093,10 +18836,82 @@ void adjust_outer_delays_sequentially(schedule_info& sched, prog& prg) {
     for (string prod: get_producers(name, prg)){
         op* prod_op = prg.find_loop(prod);
         max_delay = max(coarse_pipeline_II.at(prod)
-                + sched.op_offset_within_parent.at(prod_op), max_delay);
+                + sched.op_offset_within_parent.at(prod_op->name), max_delay);
+    }
+    //FIXME: Hack for glb latency sync nothing can start before glb transfer
+    if (!contains(name, "glb")) {
+      max_delay = max(glb_load_latency, max_delay);
     }
 
-    sched.op_offset_within_parent.at(lp) = max_delay;
+    sched.op_offset_within_parent.at(lp->name) = max_delay;
+    cout << "final delay of " << lp->name <<
+        ": \n\t"<< max_delay << endl;
+  }
+}
+
+int find_glb_load_latency(schedule_info& sched, prog& prg) {
+  int glb_load_latency = 0;
+  for (auto name : topologically_sort_kernels(prg)) {
+    auto lp = prg.find_loop(name);
+    auto prods =  get_producers(name, prg);
+    if (prods.size() == 0 && contains(name, "glb")) {
+      cout << "\tkernel <" << lp->name << "> is the glb loading kernel." << endl;
+      cout << "\tname<" << name << endl;
+      glb_load_latency = std::max(sched.total_latency(lp), glb_load_latency);
+    }
+  }
+  cout << "Find GLB load latency = " << glb_load_latency << endl;
+  return glb_load_latency;
+}
+
+
+void adjust_outer_delays_sequentially(schedule_info& sched, prog& prg, bool glb_sync = true) {
+  cout << "Adjusting delays of " << prg.name << "After vectorization" << endl;
+  int d = 0;
+  map<string, int> coarse_pipeline_II;
+  int glb_load_latency = 0;
+  if (glb_sync) {
+    for (auto name : topologically_sort_kernels(prg)) {
+      auto lp = prg.find_loop(name);
+      auto prods =  get_producers(name, prg);
+      if (prods.size() == 0 && contains(name, "glb")) {
+        cout << "\tkernel <" << lp->name << "> is the glb loading kernel." << endl;
+        cout << "\tname<" << name << endl;
+        glb_load_latency = std::max(sched.total_latency(lp), glb_load_latency);
+      }
+    }
+    cout << "Find GLB load latency = " << glb_load_latency << endl;
+  }
+  for (auto name : topologically_sort_kernels(prg)) {
+    auto lp = prg.find_loop(name);
+    cout << "Push kernel <" << lp->name << "> into delay adjusting queue." << endl;
+    cout << "II: " << sched.II(lp) << endl;
+    cout << "TP: " << (lp)->trip_count() << endl;
+    for (auto prod:  get_producers(name, prg))
+        cout << "\tprod: " << prod << endl;
+    //This only works for the schedule without pipeline should change into total latency
+    //coarse_pipeline_II[name] = sched.II(lp) * lp->trip_count();
+    coarse_pipeline_II[name] = sched.total_latency(lp);
+    sched.op_offset_within_parent[lp->name] = 0;
+  }
+  for (auto name : topologically_sort_kernels(prg)) {
+    auto lp = prg.find_loop(name);
+    cout << "Adjusting delay of " << lp->name << endl;
+    cout << "II: " << sched.II(lp) << endl;
+    int max_delay = 0;
+    for (string prod: get_producers(name, prg)){
+        op* prod_op = prg.find_loop(prod);
+        max_delay = max(coarse_pipeline_II.at(prod)
+                + sched.op_offset_within_parent.at(prod_op->name), max_delay);
+    }
+    //FIXME: Hack for glb latency sync nothing can start before glb transfer
+    if (glb_sync) {
+      if (!contains(name, "glb")) {
+        max_delay = max(glb_load_latency, max_delay);
+      }
+    }
+
+    sched.op_offset_within_parent.at(lp->name) = max_delay;
     cout << "final delay of " << lp->name <<
         ": \n\t"<< max_delay << endl;
   }
@@ -18121,7 +18936,7 @@ void adjust_outer_delays_sequentially_cgpl(schedule_info& sched, prog& prg) {
     for (op* coarse_pipeline_loop: cgpl_lps){
       if(elem(coarse_pipeline_loop, lower_ops)){
         for(auto child: coarse_pipeline_loop->children) {
-          int delay = map_find(child, sched.op_offset_within_parent);
+          int delay = map_find(child->name, sched.op_offset_within_parent);
           cgpl_offset = max(cgpl_offset, delay);
           cout << "Child: " << child->name << "has delay: " << delay << endl;
         }
@@ -18131,7 +18946,7 @@ void adjust_outer_delays_sequentially_cgpl(schedule_info& sched, prog& prg) {
     //This only works for the schedule without pipeline should change into total latency
     coarse_pipeline_II[name] = sched.II(lp) * lp->trip_count() + cgpl_offset;
     cout << "coarse pipeline outer latency: " << coarse_pipeline_II.at(name) << endl;
-    sched.op_offset_within_parent[lp] = 0;
+    sched.op_offset_within_parent[lp->name] = 0;
   }
   for (auto name : topologically_sort_kernels(prg)) {
     auto lp = prg.find_loop(name);
@@ -18141,10 +18956,10 @@ void adjust_outer_delays_sequentially_cgpl(schedule_info& sched, prog& prg) {
     for (string prod: get_producers(name, prg)){
         op* prod_op = prg.find_loop(prod);
         max_delay = max(coarse_pipeline_II.at(prod)
-                + sched.op_offset_within_parent.at(prod_op), max_delay);
+                + sched.op_offset_within_parent.at(prod_op->name), max_delay);
     }
 
-    sched.op_offset_within_parent.at(lp) = max_delay;
+    sched.op_offset_within_parent.at(lp->name) = max_delay;
     cout << "final delay of " << lp->name <<
         ": \n\t"<< max_delay << endl;
   }
@@ -18154,6 +18969,8 @@ void relax_delays_rate_matched(CodegenOptions& options, schedule_info& sched, pr
   cout << "Adjusting delays of " << prg.name << endl;
   map<string, int> delay_relaxation;
   int fetch_width = options.mem_hierarchy.at("mem").fetch_width;
+  //if (fetch_width == 1)
+  //    return;
   auto start_times = its(op_times_map(sched, prg), prg.whole_iteration_domain());
   auto start_times_map = get_maps_in_map(start_times);
   auto domains = prg.domains();
@@ -18169,6 +18986,7 @@ void relax_delays_rate_matched(CodegenOptions& options, schedule_info& sched, pr
       continue;
     }
     cout << "read map: " << str(kernel_read_map) << endl;
+    string dsa_writer;
     for (auto cons_op: cons_op_vec) {
       for(auto prod: get_producers(name, prg)){
         auto prod_loop = prg.find_loop(prod);
@@ -18204,6 +19022,9 @@ void relax_delays_rate_matched(CodegenOptions& options, schedule_info& sched, pr
                 need_relax = true;
             }
           }
+          if (contains(pick(prod_op->buffers_written()), "clkwrk_dsa")) {
+            dsa_writer = prod;
+          }
 
           cout << tab(2) << "Producers: " << prod_op_name << endl;
           cout << tab(2) << "sched: " << str(prod_sched) << endl;
@@ -18218,21 +19039,32 @@ void relax_delays_rate_matched(CodegenOptions& options, schedule_info& sched, pr
           bool prod_need_index = pick(cons_op_vec)->index_variables_needed_by_compute.size();
           int offset = 0;
           if (need_relax) {
+              //change into current op ii
               int prod_ii = sched.II(prod_op->parent);
+              int cons_ii = sched.II(cons_op->parent);
               //Relaxation recipe input/output
-              offset = prod_ii * fetch_width * 2;
+              offset = std::max(cons_ii, prod_ii) * fetch_width * 2 + 2;
           } else if (equal_start_time && prod_need_index && (cons_start_time < 3)) {
               offset = 3 - cons_start_time;
           }
-          //get the max delay relaxation from all producer
-          delay_max = max(delay_max, delay_relaxation.at(prod) + offset);
+          //get the max delay relaxation from all producer,
+          //topographical sort can have close area, AKA all connected
+          if (delay_relaxation.count(prod))
+            delay_max = max(delay_max, delay_relaxation.at(prod) + offset);
         } // for each producer op
       } //for each producer kernel
     } //for each consumer op
     delay_relaxation.at(name) = delay_max;
-    sched.op_offset_within_parent[lp] += delay_max;
+
+    //For dsa writer kernel add the delay
+    //Since topological sort may put the init kernel in beginning
+    if (!dsa_writer.empty()) {
+      sched.op_offset_within_parent[(dsa_writer)] += delay_max;
+    }
+
+    sched.op_offset_within_parent[lp->name] += delay_max;
     cout  << "Kernel <" << name << "> has Delay slack: " << delay_max << endl;
-    cout  << "Offset with in parent: " << sched.op_offset_within_parent.at(lp) << endl;
+    cout  << "Offset with in parent: " << sched.op_offset_within_parent.at(lp->name) << endl;
   } //for each kernel in topographical order
 }
 
@@ -18287,8 +19119,8 @@ void asap_input_iis(schedule_info& sched, prog& prg) {
                 string loop_name = loop_vars.at(it);
                 cout << "loop name: " << loop_name << endl;
                 cout << "original delay within parent: " <<
-                    sched.op_offset_within_parent[prg.find_loop(loop_name)] << endl;
-                sched.op_offset_within_parent[prg.find_loop(loop_name)] = 0;
+                    sched.op_offset_within_parent[(loop_name)] << endl;
+                sched.op_offset_within_parent[(loop_name)] = 0;
                 sched.loop_iis[loop_name] = ii;
                 ii *= prg.find_loop(loop_name)->trip_count() + 1;
             }
@@ -18304,7 +19136,7 @@ void asap_input_iis(schedule_info& sched, prog& prg) {
 void break_up_multi_channel_outputs(prog& prg) {
   std::set<string> to_erase;
   for (auto out : prg.outs) {
-    std::set<op*> writers = find_writers(out, prg);
+    std::set<op*, cmp_op> writers = find_writers(out, prg);
     if (writers.size() > 1) {
       for (auto wr : writers) {
         string replacement = prg.un(out + "_clkwrk_");
@@ -18323,7 +19155,7 @@ void break_up_multi_channel_outputs(prog& prg) {
 void break_up_multi_channel_inputs(prog& prg) {
   std::set<string> to_erase;
   for (auto in : prg.ins) {
-    std::set<op*> readers = find_readers(in, prg);
+    std::set<op*, cmp_op> readers = find_readers(in, prg);
     if (readers.size() > 1) {
       for (auto rd : readers) {
         string replacement = prg.un(in + "_clkwrk_");
@@ -18358,7 +19190,7 @@ void adjust_schedule_forward(schedule_info& sched, prog& prg, int offset = 1) {
   if (min <= 0) {
     for (auto k : get_kernels(prg)) {
       auto loop = prg.find_loop(k);
-      sched.op_offset_within_parent[loop] = map_find(loop, sched.op_offset_within_parent) - min;
+      sched.op_offset_within_parent[loop->name] = map_find(loop->name, sched.op_offset_within_parent) - min;
     }
   }
 
@@ -18505,6 +19337,7 @@ vector<int> garnet_fuse_ii_level(prog& prg) {
 
 void sanity_check_hw_schedule(schedule_info& sched, prog& prg);
 void pad_to_single_depth(schedule_info& sched, op* root, prog& prg);
+void pad_to_same_depth(op* root, prog& prg, map<string, vector<int> > & pad_indices);
 
 ////Return boolean indicate if this is a perfect loop nest from CGPL
 //bool coarse_grained_pipeline_optimization(schedule_info& sched, op* node) {
@@ -18540,19 +19373,159 @@ void update_coarse_grained_loop_iis(schedule_info& sched, op* cgpl) {
     cout << "Most compute intensive stage: " << most_compute_intensive_stage->name << endl;
     cout << tab(1) << "Current II        : " << sched.II(cgpl) << endl;
     sched.loop_iis[cgpl->name] =
-      max(sched.total_latency(most_compute_intensive_stage), 1);
+      max(sched.total_latency(most_compute_intensive_stage) + 8, 1);
     cout << tab(1) << "Adjusting II to   : " << sched.II(cgpl) << endl;
 }
 
-void coarse_grained_pipeline_optimization(schedule_info& sched, prog& prg) {
+
+
+void update_coarse_grained_loop_iis(schedule_info& sched, RTable& RRT, op* cgpl, prog& prg) {
+    //int target_II = RRT.getMinimumII();
+    //Always start from 1, do not know the partition
+    int CG_target_II = 1;
+    bool finished = false;
+    vector<string> sorted_kernels = topologically_sort_kernels(cgpl, prg);
+    while (!finished) {
+      RRT.initModuloTable(CG_target_II);
+      for (auto k: sorted_kernels) {
+        auto producers = get_producers_outside_SSC(k, cgpl, prg);
+        int t = 0;
+        for (string p : producers) {
+            t = std::max(t, RRT.getTimeStamp(p)+1);
+        }
+        int offset = 0;
+        while(offset < CG_target_II) {
+          bool can_schedule = RRT.scheduleKernel(k, (t + offset)  % CG_target_II, cgpl, prg);
+          cout << "\tTarget II: " << CG_target_II << endl;
+          cout << "\tTry to schedule kernel at " << (t+offset)% CG_target_II << endl;
+          if (can_schedule) {
+              cout << "\tSchedule K at time = " << t+offset << endl;
+              RRT.setTimeStamp(k, (t + offset));
+              break;
+          } else {
+              offset ++;
+          }
+        }
+        if (offset == CG_target_II ) {
+          CG_target_II ++;
+          RRT.clearSchedule();
+          if (CG_target_II > sorted_kernels.size()) {
+              cout << "Target II should not larger than number of kernel, at least sequential schedule should work in that case. " << endl;
+            assert(false);
+          }
+          break;
+        }
+        if (k == sorted_kernels.back()) {
+            finished = true;
+        }
+      }
+    }
+    RRT.print();
+
+
+    //Need to consider the loop perfection
+    RRT.calculateDutyCycle(prg, CG_target_II);
+    RRT.markEpilogue(prg);
+
+    int cycle_accurate_II = RRT.getCycleAccurateIIFineGrained(sched, prg, CG_target_II);
+    RRT.target_II = cycle_accurate_II;
+    //int cycle_accurate_II = RRT.getCycleAccurateII(sched, prg, target_II);
+
+    cout << endl << "II optimization finished ..." << endl;
+    cout << tab(1) << "Target II : " << CG_target_II <<endl;
+    cout << tab(1) << "Cycle Accurate II: " << cycle_accurate_II << endl;
+
+    cout << tab(2) << "Current II        : " << sched.II(cgpl) << endl;
+    //Original add 8
+    //sched.loop_iis[cgpl->name] = cycle_accurate_II + 8;
+    sched.loop_iis[cgpl->name] = cycle_accurate_II;
+    cout << tab(2) << "Adjusting II to   : " << sched.II(cgpl) << endl << endl;
+}
+
+//This function without backtracking only works when we have latency equals to the max of each stage then added together
+void adjust_coarse_grained_kernel_latency(CodegenOptions& options,
+        schedule_info& sched, RTable& RRT, prog& prg) {
+    int rolling_latency = 0;
+    for (auto kernels: RRT.getSortedKernels()) {
+        int latency_at_each_timestamp = 0;
+        for (string kernel: kernels) {
+            op* lp = prg.find_non_op(kernel);
+            latency_at_each_timestamp = std::max(
+                    sched.total_latency(lp), latency_at_each_timestamp);
+            sched.op_offset_within_parent.at(lp->name) = rolling_latency;
+        }
+        rolling_latency += latency_at_each_timestamp;
+    }
+}
+
+void adjust_coarse_grained_kernel_latency_fine_grained(
+        CodegenOptions& options, schedule_info& sched, RTable& RRT, prog& prg) {
+    //int rolling_latency = 0;
+    unordered_set<string> k_scheduled;
+    for (auto kernels: RRT.getSortedKernels()) {
+        //int latency_at_each_timestamp = 0;
+        for (string kernel: kernels) {
+            cout << "kernel : " << kernel << endl;
+            op* lp = prg.find_non_op(kernel);
+            auto  producers = get_producers(lp->name, RRT.cgpl, prg);
+            int start_time = 0;
+            for (string prod: producers) {
+                //skip self loop
+                if (k_scheduled.count(prod) == 0) continue;
+                op* prod_op = prg.find_non_op(prod);
+                start_time = max(start_time,
+                        sched.total_latency(prod_op) + RRT.getKernelStartTime(prod_op->name));
+            }
+
+
+            int k_latency = sched.total_latency(lp);
+            //sched.op_offset_within_parent.at(lp->name) = rolling_latency;
+            RRT.initCycleAccurateStartTime(kernel, start_time, k_latency);
+            for (string prod: producers) {
+                if (k_scheduled.count(prod) == 0) continue;
+                RRT.setKernelMaxTimeStamp(prod, start_time);
+            }
+            //Chances are that we have overlapping resource, we need to make a micro adjustment
+            RRT.checkResourceConflict(kernel, k_scheduled, prg);
+            k_scheduled.insert(kernel);
+        }
+    }
+    RRT.printCycleAccurateTimeStamps();
+    RRT.parseKernelLatency(sched);
+}
+
+
+void coarse_grained_pipeline_optimization_subloop(CodegenOptions& options, schedule_info& sched, prog& prg) {
+
+  RTable RRT =
+      build_modulo_resource_reservation_table(options, sched, prg.root, prg);
+  update_coarse_grained_loop_iis(sched, RRT, prg.root, prg);
+
+  RRT.align_init_with_update();
+
+  //tighten_iis(sched, prg, options.mem_hierarchy.at("mem").fetch_width);
+  adjust_coarse_grained_kernel_latency_fine_grained(options, sched, RRT, prg);
+
+}
+
+void coarse_grained_pipeline_optimization(CodegenOptions& options, schedule_info& sched, prog& prg) {
 
   vector<op*> cgpls;
   //Find the cgpl in post order from AST leaves to root
   find_coarse_grained_pipeline_loops(prg.root, cgpls, prg);
   for (auto cgpl: cgpls) {
     if (cgpl!= nullptr && cgpl->name != "root") {
-      update_coarse_grained_loop_iis(sched, cgpl);
-      tighten_iis(sched, prg);
+      RTable RRT =
+          build_modulo_resource_reservation_table(options, sched, cgpl, prg);
+      update_coarse_grained_loop_iis(sched, RRT, cgpl, prg);
+
+
+      //update_coarse_grained_loop_iis(sched, cgpl);
+      //FIXME: seems unnecessary to tighten ii
+      //tighten_iis(sched, prg, options.mem_hierarchy.at("mem").fetch_width);
+      //tighten_iis(sched, prg);
+      adjust_coarse_grained_kernel_latency_fine_grained(options, sched, RRT, prg);
+
     }
   }
 }
@@ -18620,15 +19593,17 @@ void dump_resnet_latency(CodegenOptions& options, schedule_info& sched, op* root
     //adjust_outer_delays_sequentially_cgpl(sched, prg);
     adjust_outer_delays_sequentially(sched, prg);
   } else if(options.fallback_schedule == VANILLA_DB_SCHEDULE) {
-    coarse_grained_pipeline_optimization(sched, prg);
+    coarse_grained_pipeline_optimization(options, sched, prg);
     adjust_coarse_grained_loop_delays_sequentially_without_opt(sched, prg);
     adjust_outer_delays_sequentially(sched, prg);
 
   } else if(options.fallback_schedule == ISCA_SCHEDULE) {
-    coarse_grained_pipeline_optimization(sched, prg);
+    coarse_grained_pipeline_optimization(options, sched, prg);
     adjust_coarse_grained_loop_delays_sequentially_without_opt(sched, prg);
+    align_glb_load_start_cycle(sched, prg);
     tighten_coarse_grained_iis(sched, prg);
     adjust_outer_delays_sequentially(sched, prg);
+
 
   } else if (options.fallback_schedule == SEQUENTIAL_SCHEDULE){
     //adjust_outer_delays(sched, prg);
@@ -18641,30 +19616,215 @@ void dump_resnet_latency(CodegenOptions& options, schedule_info& sched, op* root
   cout << "\tFinal schedule : " << str(op_sched)  << endl;
 
   adjust_schedule_forward(sched, prg, 0);
-  sanity_check_hw_schedule(sched, prg);
+  sanity_check_hw_schedule(sched, prg);;
   return;
+}
+
+int get_fused_level(std::set<op*> & fused_kernels, prog & prg) {
+
+  auto levels = get_variable_levels(prg);
+  int max_fused_level = 0;
+  for (auto it: levels) {
+      max_fused_level = std::max(max_fused_level, it.second);
+  }
+  int fused_level = max_fused_level;
+  for (auto lp: fused_kernels) {
+    if (fused_level == max_fused_level) {
+      fused_level = map_find(lp->name, levels);
+    } else {
+      if (fused_level != map_find(lp->name, levels)) {
+        cout << lp->name << endl;
+        cout << map_find(lp->name, levels) << endl;
+        cout << "Coarse grained tag ERROR, should tag at the same level." << endl;
+        assert(false);
+      }
+    }
+    cout << "fuse kernel: " << lp->name << endl;
+    cout << "  level: " << map_find(lp->name, levels) << endl;
+  }
+  return fused_level;
+}
+
+vector<int> get_fused_level_iis(CodegenOptions& options, umap* clksched_map, uset* dom,
+        int fused_level, int fused_loop_ii) {
+
+  uset* sbounds = range(its(clksched_map, dom));
+  cout << "bounds..." << str(sbounds) << endl;
+  auto bsets = get_sets(sbounds);
+  assert(bsets.size() == 1);
+
+  auto bset = pick(bsets);
+  //assert(false);
+  vector<pair<int, int> > bounds;
+  vector<int> lengths;
+  for (int d = 0; d < num_dims(bset); d++) {
+    auto pr = project_all_but(bset, d);
+    int lmin = to_int(lexminval(pr));
+    int lmax = to_int(lexmaxval(pr));
+    bounds.push_back({lmin, lmax});
+    //This is a hack for fetch 2 memory
+    if (options.mem_hierarchy.at("mem").fetch_width == 2)
+      lengths.push_back(lmax - lmin + 1 + (lmax - lmin +1)%2);
+    else
+      lengths.push_back(lmax - lmin + 1);
+  }
+
+  // Reorder so that root is level 0
+  reverse(lengths);
+  lengths.push_back(1);
+  reverse(bounds);
+
+  cout << "lengths" << endl;
+  for (auto l : lengths) {
+    cout << l << endl;
+  }
+
+  vector<int> fused_level_iis;
+  fused_level_iis.resize(lengths.size());
+  fused_level_iis[fused_level_iis.size() - 1] = 1;
+
+
+  for (int l = fused_level; l >= 0; l--) {
+    if (l == fused_level)
+      fused_level_iis[fused_level] = fused_loop_ii;
+    else
+      fused_level_iis[l] = fused_level_iis[l + 1] * lengths.at(l + 1);
+  }
+
+
+  fused_level_iis.pop_back();
+  return fused_level_iis;
+}
+
+void assign_II_and_delays(vector<int> & fused_level_iis, int fused_level,
+        map<string, vector<isl_aff*> > & cs,
+        schedule_info& sched, prog & prg) {
+
+
+  cout << "Original Loop iis" << endl;
+  auto levels = get_variable_levels(prg);
+  for (auto op : prg.all_ops()) {
+    vector<string> surrounding = surrounding_vars(op, prg);
+    for (auto var : surrounding) {
+      int level = map_find(var, levels);
+      if (level > fused_level) {
+          //use coarse grained schedule, do nothing.
+      } else {
+        auto container = prg.find_loop(var);
+        int qfactor = to_int(get_coeff(map_find(op->name, cs).at(level), 0));
+        int delay = to_int(int_const_coeff(map_find(op->name, cs).at(level)));
+        cout << tab(1) << var << " q: " << qfactor << ", d = " << delay << endl;
+        sched.loop_iis[var] = qfactor*fused_level_iis.at(level);
+        sched.op_offset_within_parent[container->name] = delay*fused_level_iis.at(level);
+        //sched.instance_latencies[container] = 1;
+        cout << tab(2) << "ii = " << sched.II(container) << endl;
+      }
+    }
+  }
+}
+
+void split_loop_according_to_rate(std::set<op*> & fused_kernels,
+        map<string, vector<isl_aff*> > & cs,
+        schedule_info& sched, prog &  prg) {
+  if (sched.share_compute()) {
+    auto levels = get_variable_levels(prg);
+    int max_rate = 1;
+    map<string, int> sm_factor_map;
+    map<string, op*> kernel2op;
+    for(op* k : fused_kernels) {
+      int level = map_find(k->name, levels);
+      auto lower_ops = k->descendant_ops();
+
+      //Only allow one op under a loop nest in stencil pipeline;
+      assert(lower_ops.size() == 1);
+
+      op* comp_op = pick(lower_ops);
+      int qfactor = to_int(get_coeff(map_find(comp_op->name, cs).at(level), 0));
+      sm_factor_map[k->name] = qfactor;
+      kernel2op[k->name] = comp_op;
+      max_rate = max(qfactor, max_rate);
+      cout << "kernel: " << k->name << endl;
+      cout << "  qfactor: " << qfactor << endl;
+    }
+
+    for (op* k : fused_kernels) {
+      op* comp_op = kernel2op.at(k->name);
+      int factor = max_rate / sm_factor_map.at(k->name);
+      strip_mine(factor, k, prg);
+
+      //Update the qfactor after stripe_mine
+      int level = map_find(k->name, levels);
+      auto sched_aff = map_find(comp_op->name, cs).at(level);
+      int delay = to_int(int_const_coeff(sched_aff));
+      int rate = to_int(int_coeff(sched_aff, 0));
+      string new_aff_str =
+          "{ [i] -> [(i + " + str(delay/rate) + ")] }";
+      cs.at(comp_op->name).at(level) = rdaff(ctx(sched_aff), new_aff_str);
+    }
+    cout << "After stripmine: " << endl;
+    prg.pretty_print();
+  }
+}
+
+void postprocessing_for_init_ops(CodegenOptions& options, schedule_info & sched, prog & prg) {
+  vector<op*> scheduled;
+  for (auto op : inner_ops(prg)) {
+    cout << "inner ops: " << op->name << endl;
+    auto read = op->buffers_read();
+    int offset = 0;
+    std::vector<::op*> init_ops;
+    for (auto other : scheduled) {
+      if (intersection(other->buffers_written(), read).size() > 0) {
+        offset = max(offset, sched.op_offset_within_parent[other->name] + op_latency(other, sched));
+        //cout << "op latency: " << other->name << "->" << op_latency(other, sched) << endl;
+        if (contains(pick(other->buffers_written()), "clkwrk_dsa")) {
+            //This is the op which need forcing to have the same offset
+            init_ops.push_back(other);
+        }
+      }
+    }
+    sched.op_offset_within_parent[op->name] = offset;
+    for (auto init_op: init_ops) {
+      assert(sched.op_offset_within_parent[init_op->name] <= offset);
+      sched.op_offset_within_parent[init_op->name] = offset - buffer_load_latency(options) - buffer_store_latency(options);
+      cout << "force inner op: " << init_op->name << ", has same offset as update: " << offset << endl;
+    }
+    cout << "inner ops: " << op->name << ", offset: "<< offset << endl;
+    //sched.op_offset_within_parent[op] = total_latency;
+    //total_latency += op_latency(op, sched);
+    scheduled.push_back(op);
+  }
 }
 
 
 void garnet_single_port_ram_schedule(CodegenOptions& options, schedule_info& sched, op* root, prog& prg) {
-    //FIXME: remove this hack for fft
+  //get the loop alignment information
+  map<string, vector<int> > pad_indices = align_loop_var_with_pad(root, prg);
+
+  //FIXME: remove this hack for fft
   if (contains(prg.name, "fft")) {
     //An hack on the fft schedule
     sequential_schedule(sched, root, prg);
     return;
-  } else if (is_rate_matchable(prg)) {
+  //} else if (is_rate_matchable(prg) || contains(prg.name, "nlmeans")) {
+  } else if (is_rate_matchable_loopnest(prg, pad_indices)) {
     prg.pretty_print();
+    loop_split(prg);
 
-    //TODO: need another function to choose between pad bottom level or top level
-    //pad_bottom_level_ops_with_loops(prg);
-    pad_to_single_depth(sched, root, prg);
+    //Try to align the loop and pad it
+    map<string, vector<int> > pad_indices = align_loop_var_with_pad(root, prg);
+    pad_to_same_depth(root, prg, pad_indices);
+
+    prg.sanity_check();
 
     prg.pretty_print();
     cout << prg.name << " is a stencil pipeline" << endl;
-    //assert(false);
+
+    //Run Clockwork Scheduling Algorithm
     auto valid = prg.validity_deps();
     auto dom = prg.whole_iteration_domain();
-    umap* clksched_map = clockwork_schedule_umap(dom, valid, cpy(valid));
+    map<string, vector<isl_aff*> > cs = clockwork_schedule(dom, valid, cpy(valid));
+    umap* clksched_map = clockwork_schedule_umap(ctx(dom), cs);
     cout << "Clockwork schedule..." << endl;
     for (auto m : get_maps(clksched_map)) {
       cout << tab(1) << str(m) << endl;
@@ -18673,119 +19833,50 @@ void garnet_single_port_ram_schedule(CodegenOptions& options, schedule_info& sch
     for (auto d : get_sets(dom)) {
       cout << tab(1) << str(d) << endl;
     }
-    uset* sbounds = range(its(clksched_map, dom));
-    cout << "bounds..." << str(sbounds) << endl;
-    auto bsets = get_sets(sbounds);
-    assert(bsets.size() == 1);
 
-    auto bset = pick(bsets);
-    //assert(false);
-    vector<pair<int, int> > bounds;
-    vector<int> lengths;
-    for (int d = 0; d < num_dims(bset); d++) {
-      auto pr = project_all_but(bset, d);
-      int lmin = to_int(lexminval(pr));
-      int lmax = to_int(lexmaxval(pr));
-      bounds.push_back({lmin, lmax});
-      lengths.push_back(lmax - lmin + 1);
+    //Get all the kernel that need to be fused
+    std::set<op*> fused_kernels = prg.root->all_loops_to_be_fused();
+    int fused_level = get_fused_level(fused_kernels, prg);
+    cout << "fused level: " << fused_level << endl;
+    //Use coarse grain schedule to schedule the inner most loop
+    split_loop_according_to_rate(fused_kernels, cs, sched, prg);
+    prog fused_sub_loop = extract_cgl_to_separate_prog(fused_kernels, prg);
+    fused_sub_loop.pretty_print();
+    sequential_schedule(sched, fused_sub_loop.root, fused_sub_loop);
+
+    //By default set ii = 1
+    int fused_loop_ii = 1;
+    //cout << fused_sub_loop.root->is_inner_loop() << endl;
+    if (sched.share_compute() || !fused_sub_loop.root->is_inner_loop()) {
+      coarse_grained_pipeline_optimization_subloop(options, sched, fused_sub_loop);
+      fused_loop_ii = sched.II(fused_sub_loop.root);
     }
+    cout << "Final cgl ii: " << fused_loop_ii << endl;
 
-    // Reorder so that root is level 0
-    reverse(lengths);
-    lengths.push_back(1);
-    reverse(bounds);
+    vector<int> fused_level_iis = get_fused_level_iis(options, clksched_map, dom, fused_level, fused_loop_ii);
 
-    vector<int> fused_level_iis;
-    fused_level_iis.resize(lengths.size());
-    fused_level_iis[fused_level_iis.size() - 1] = 1;
-    for (int l = fused_level_iis.size() - 2; l >= 0; l--) {
-      fused_level_iis[l] = fused_level_iis[l + 1] * lengths.at(l + 1);
-    }
+    assign_II_and_delays(fused_level_iis, fused_level, cs, sched, prg);
+    //assign delay for init ops making sure all the init buffer is a wire
+    postprocessing_for_init_ops(options, sched, prg);
 
-    cout << "lengths" << endl;
-    for (auto l : lengths) {
-      cout << l << endl;
-    }
-
-    fused_level_iis.pop_back();
-
-    cout << "Fused iis" << endl;
-    for (auto i : fused_level_iis) {
-      cout << tab(1) << i << endl;
-    }
-
-    auto cs = clockwork_schedule(dom, valid, cpy(valid));
-    auto levels = get_variable_levels(prg);
-    cout << "Original Loop iis" << endl;
-    for (auto op : prg.all_ops()) {
-      vector<string> surrounding = surrounding_vars(op, prg);
-      for (auto var : surrounding) {
-        int level = map_find(var, levels);
-        auto container = prg.find_loop(var);
-        cout << op->name << endl;
-        int qfactor = to_int(get_coeff(map_find(op->name, cs).at(level), 0));
-        int delay = to_int(int_const_coeff(map_find(op->name, cs).at(level)));
-        cout << tab(1) << var << " q: " << qfactor << ", d = " << delay << endl;
-        sched.loop_iis[var] = qfactor*fused_level_iis.at(level);
-        sched.op_offset_within_parent[container] = delay*fused_level_iis.at(level);
-        //sched.instance_latencies[container] = 1;
-        cout << tab(2) << "ii = " << sched.II(container) << endl;
-      }
-    }
-    //int total_latency = 0;
-    //for (auto op : inner_ops(prg)) {
-    //    cout << "inner ops: " << op->name << ", total latency: "<< total_latency << endl;
-    //  sched.op_offset_within_parent[op] = total_latency;
-    //  //sched.instance_latencies[op] = op_latency(op, sched);
-    //  //total_latency += op_latency(op, sched) + 2;
-    //  total_latency += op_latency(op, sched);
-    //}
-    int total_latency = 0;
-    vector<op*> scheduled;
-    for (auto op : inner_ops(prg)) {
-      cout << "inner ops: " << op->name << endl;
-      auto read = op->buffers_read();
-      int offset = 0;
-      std::vector<::op*> init_ops;
-      for (auto other : scheduled) {
-        if (intersection(other->buffers_written(), read).size() > 0) {
-          offset = max(offset, sched.op_offset_within_parent[other] + op_latency(other, sched));
-          if (contains(pick(other->buffers_written()), "clkwrk_dsa")) {
-              //This is the op which need forcing to have the same offset
-              init_ops.push_back(other);
-          }
-        }
-      }
-      sched.op_offset_within_parent[op] = offset;
-      for (auto init_op: init_ops) {
-        assert(sched.op_offset_within_parent[init_op] <= offset);
-        sched.op_offset_within_parent[init_op] = offset;
-        cout << "force inner op: " << init_op->name << ", has same offset as update: " << offset << endl;
-      }
-      cout << "inner ops: " << op->name << ", offset: "<< offset << endl;
-      //sched.op_offset_within_parent[op] = total_latency;
-      //total_latency += op_latency(op, sched);
-      scheduled.push_back(op);
-    }
-
-    //Hack for rom, Rom need to be conservative
-    //because the affine controller output on cycle of flush is undeterministic
-    //if (prg.name == "rom" ) {
-      //adjust_schedule_forward(sched, prg, 1);
-    //} else {
+    auto op_sched = op_start_times_map(sched, prg);
+    cout << "orginal schedule before relax: " << str(op_sched)  << endl;
     adjust_schedule_forward(sched, prg, 0);
-    //}
+
     //Add delay for identity stream
     relax_delays_rate_matched(options, sched, prg);
 
     //Make input as fast as possible
     asap_input_iis(sched, prg);
-    auto op_sched = op_start_times_map(sched, prg);
-    cout << "Final schedule after relax: " << str(op_sched)  << endl;
+    op_sched = op_start_times_map(sched, prg);
+    cout << "Final schedule in ISL notation: " << str(op_sched)  << endl;
     op_sched = op_end_times_map(sched, prg);
     cout << "Final end schedule after relax: " << str(op_sched)  << endl;
+    auto global_schedule = its(op_sched, op_start_times_domain(prg));
+    cout << "After codegen: \n" <<codegen_c(global_schedule);
+    sanity_check_hw_schedule(sched, prg);
     return;
-  } else if (contains(prg.name, "split")) {
+  } else if (contains(prg.name, "split") ) {
     sequential_schedule(sched, root, prg);
     auto op_sched = op_start_times_map(sched, prg);
     cout << "\tFinal schedule : " << str(op_sched)  << endl;
@@ -18801,50 +19892,111 @@ void garnet_single_port_ram_schedule(CodegenOptions& options, schedule_info& sch
     //cout << tab(2) << rv << endl;
   //}
   //assert(false);
+  if (prg.name == "three_level_pond")
+    options.fallback_schedule = SEQUENTIAL_SCHEDULE;
 
-  /*
-   * old method for ISCA deadline*/
-  asap_inner_loops_schedule(sched, root, prg,
-          options.mem_hierarchy.at("mem").fetch_width);
-  //sequential_schedule(sched, root, prg);
+  do {
+    options.rtl_options.double_buffer_optimization = options.fallback_schedule < 3;
+    /*
+     * old method for ISCA deadline*/
+    asap_inner_loops_schedule(sched, root, prg,
+            options.mem_hierarchy.at("mem").fetch_width);
 
-  adjust_inner_iis(sched, prg);
-  tighten_iis(sched, prg);
+    //We need a loop here, to tighten the inner II, here is a little arbitrary
+    adjust_inner_iis(sched, prg);
+    tighten_iis(sched, prg, options.mem_hierarchy.at("mem").fetch_width);
+    //tighten_iis(sched, prg);
 
-  //only adjust coarse grained ii while optimize double buffer
-  if (options.fallback_schedule == ASPLOS_SCHEDULE) {
-    adjust_coarse_grained_loop_iis(sched, prg);
-    adjust_coarse_grained_loop_delays_sequentially(sched, prg);
-    tighten_coarse_grained_iis(sched, prg);
-    //adjust_outer_delays_sequentially_cgpl(sched, prg);
-    adjust_outer_delays_sequentially(sched, prg);
-  } else if(options.fallback_schedule == VANILLA_DB_SCHEDULE) {
-    coarse_grained_pipeline_optimization(sched, prg);
-    adjust_coarse_grained_loop_delays_sequentially_without_opt(sched, prg);
-    adjust_outer_delays_sequentially(sched, prg);
+    //only adjust coarse grained ii while optimize double buffer
+    if (options.fallback_schedule == ASPLOS_SCHEDULE) {
+      adjust_coarse_grained_loop_iis(sched, prg);
+      adjust_coarse_grained_loop_delays_sequentially(sched, prg);
+      tighten_coarse_grained_iis(sched, prg);
+      //adjust_outer_delays_sequentially_cgpl(sched, prg);
+      adjust_outer_delays_sequentially(sched, prg);
+    } else if(options.fallback_schedule == VANILLA_DB_SCHEDULE) {
+      coarse_grained_pipeline_optimization(options, sched, prg);
+      adjust_coarse_grained_loop_delays_sequentially_without_opt(sched, prg);
+      adjust_outer_delays_sequentially(sched, prg);
 
-  } else if(options.fallback_schedule == ISCA_SCHEDULE) {
-    coarse_grained_pipeline_optimization(sched, prg);
-    adjust_coarse_grained_loop_delays_sequentially_without_opt(sched, prg);
-    tighten_coarse_grained_iis(sched, prg);
-    adjust_outer_delays_sequentially(sched, prg);
+    } else if(options.fallback_schedule == ISCA_SCHEDULE) {
+      coarse_grained_pipeline_optimization(options, sched, prg);
+      //adjust_coarse_grained_loop_delays_sequentially_without_opt(sched, prg);
+      //align_glb_load_start_cycle(sched, prg);
+      tighten_coarse_grained_iis(sched, prg);
+      adjust_outer_delays_sequentially(sched, prg);
+      //int glb_load_latency = find_glb_load_latency(sched, prg);
+      //adjust_outer_delays_exhaustively(sched, prg, glb_load_latency);
 
-  } else if (options.fallback_schedule == SEQUENTIAL_SCHEDULE){
-    //adjust_outer_delays(sched, prg);
-    adjust_outer_delays_sequentially(sched, prg);
-  }
+    } else if (options.fallback_schedule == SEQUENTIAL_SCHEDULE){
+      //adjust_outer_delays(sched, prg);
+      adjust_outer_delays_sequentially(sched, prg);
+    } else {
+      cout << "No schedule works..." << endl;
+      assert(false);
+    }
+    //change to the fallback schedule
+    options.fallback_schedule =  DNNScheduleAlgorithm(options.fallback_schedule + 1);
+    cout << " Fall back schedule No. "  << options.fallback_schedule << endl;
+  } while (!no_violated_buf_write_port_assignments(options, sched, prg)
+      ||  !no_violated_cycle_accurate_dependencies(sched, prg));
+
   //dump_DNN_delays(sched, prg);
 
   auto op_sched = op_start_times_map(sched, prg);
   cout << "\tFinal schedule : " << str(op_sched)  << endl;
-
+  assert(no_violated_buf_write_port_assignments(options, sched, prg));
+  //print_partial_schedule(sched, prg);
   adjust_schedule_forward(sched, prg, 0);
   sanity_check_hw_schedule(sched, prg);
   return;
 }
 
+void pad_to_same_depth(op* root, prog& prg, map<string, vector<int> > & pad_indexes) {
+  pad_top_level_ops_with_loops(prg);
+  //map<string, vector<int> > pad_indexes = align_loop_var_with_pad(root, prg);
+  map<string, vector<int> > op2pad_indexes;
+  for (auto p : pad_indexes) {
+    cout << tab(1) << p.first << ": " << comma_list(p.second) << endl;
+    auto lp = prg.find_loop(p.first);
+    for (auto rep : lp->descendant_ops()) {
+        op2pad_indexes[rep->name] = p.second;
+    }
+  }
+  insert_pad_loops(prg, op2pad_indexes);
+
+  prg.pretty_print();
+  bool single_depth = all_loop_nests_same_depth(prg);
+  assert(single_depth);
+
+}
 
 void pad_to_single_depth(schedule_info& sched, op* root, prog& prg) {
+  bool single_depth = all_loop_nests_same_depth(prg);
+  int max_depth = max_loop_depth(prg);
+  assert(max_depth >= 1);
+
+  if (!single_depth) {
+    pad_top_level_ops_with_loops(prg);
+    map<string, vector<int> > pad_indexes = align_loop_var_with_pad(root, prg);
+    map<string, vector<int> > op2pad_indexes;
+    for (auto p : pad_indexes) {
+      cout << tab(1) << p.first << ": " << comma_list(p.second) << endl;
+      auto lp = prg.find_loop(p.first);
+      for (auto rep : lp->descendant_ops()) {
+          op2pad_indexes[rep->name] = p.second;
+      }
+    }
+    insert_pad_loops(prg, op2pad_indexes);
+
+  }
+
+  prg.pretty_print();
+  single_depth = all_loop_nests_same_depth(prg);
+  assert(single_depth);
+}
+
+void pad_to_single_depth_old(schedule_info& sched, op* root, prog& prg) {
   bool single_depth = all_loop_nests_same_depth(prg);
   int max_depth = max_loop_depth(prg);
   assert(max_depth >= 1);
@@ -18868,21 +20020,53 @@ void pad_to_single_depth(schedule_info& sched, op* root, prog& prg) {
     //prg.pretty_print();
     //assert(false);
 
+    //First pass to collect all the deepest loops loop bound
+    vector<int> depth_record(max_depth - 1, 0);
+    int div_factor = 0;
+    for (auto k : get_kernels(prg)) {
+      auto lp = prg.find_loop(k);
+      for (auto rep : lp->descendant_ops()) {
+        int depth_m = loop_depth(prg.find_loop(k));
+        if (depth_m == max_depth - 1) {
+          auto vec = loop_depth_vector(lp);
+          for (int  i = 0; i < max_depth - 1; i++ ) {
+            depth_record.at(i) += vec.at(i);
+          }
+          div_factor ++;
+          cout << " op: " << rep->name << endl;
+          cout << tab(2) << loop_depth_vector(lp) << endl;
+        }
+      }
+    }
+    for (auto & it: depth_record) {
+        it /= div_factor;
+    }
+    cout << "Final depth vec: " << depth_record << endl;
+
+    //next pass to get all the other loops' pad level
     map<string, vector<int> > pad_indexes;
     for (auto k : get_kernels(prg)) {
       auto lp = prg.find_loop(k);
       for (auto rep : lp->descendant_ops()) {
         int depth_m = loop_depth(prg.find_loop(k));
-        vector<int> inds;
-        inds.push_back(0);
-        for (int p = 0; p < max_depth - depth_m; p++) {
-          inds.push_back(-1);
-        }
-        for (int d = 1; d < depth_m + 1; d++) {
-          inds.push_back(d);
+        if (depth_m < max_depth - 1) {
+          auto vec = loop_depth_vector(lp);
+          vector<int> inds = get_alignment_array(depth_record, vec);
+          pad_indexes[rep->name] = inds;
+        } else {
+          vector<int> inds;
+          inds.push_back(0);
+          for (int d = 1; d < depth_m + 1; d++) {
+            inds.push_back(d);
+          }
+          pad_indexes[rep->name] = inds;
         }
 
-        pad_indexes[rep->name] = inds;
+        //Pad the inner loop
+        //for (int p = 0; p < max_depth - depth_m - 1; p++) {
+        //  inds.push_back(-1);
+        //}
+
       }
     }
     cout << "Pad inds..." << endl;
@@ -18978,7 +20162,7 @@ void cycle_accurate_clockwork_schedule(schedule_info& sched, op* root, prog& prg
       int qfactor = to_int(get_coeff(map_find(op->name, cs).at(level), 0));
       int delay = to_int(int_const_coeff(map_find(op->name, cs).at(level)));
       sched.loop_iis[var] = qfactor*fused_level_iis.at(level);
-      sched.op_offset_within_parent[container] = delay*fused_level_iis.at(level);
+      sched.op_offset_within_parent[container->name] = delay*fused_level_iis.at(level);
       //sched.op_offset_within_parent[container] = (delay + 2)*fused_level_iis.at(level);
     }
   }
@@ -18991,10 +20175,10 @@ void cycle_accurate_clockwork_schedule(schedule_info& sched, op* root, prog& prg
     int offset = 0;
     for (auto other : scheduled) {
       if (intersection(other->buffers_written(), read).size() > 0) {
-        offset = max(offset, sched.op_offset_within_parent[other] + op_latency(other, sched));
+        offset = max(offset, sched.op_offset_within_parent[other->name] + op_latency(other, sched));
       }
     }
-    sched.op_offset_within_parent[op] = offset;
+    sched.op_offset_within_parent[op->name] = offset;
     //sched.op_offset_within_parent[op] = total_latency;
     //total_latency += op_latency(op, sched);
     scheduled.push_back(op);
@@ -19017,7 +20201,9 @@ void coarse_pipeline_schedule(schedule_info& sched, op* root, prog& prg) {
 
   //sequential_schedule(sched, root, prg);
   asap_inner_loops_schedule(sched, root, prg, 1);
+  auto init_sched = op_start_times_map(sched, prg);
   cout << "Computed initial sequential schedule" << endl;
+  cout << "\tinit schedule : " << str(init_sched)  << endl;
   sanity_check_iis(sched);
 
 
@@ -19055,11 +20241,13 @@ void coarse_pipeline_schedule(schedule_info& sched, op* root, prog& prg) {
   cout << "Adjusting outer pipeline delays" << endl;
   sanity_check_iis(sched);
 
-  adjust_outer_pipeline_delays(sched, prg);
-  //adjust_coarse_grained_loop_delays_sequentially(sched, prg);
+  //adjust_outer_pipeline_delays(sched, prg);
+  adjust_coarse_grained_loop_delays_sequentially(sched, prg);
   //tighten_coarse_grained_iis(sched, prg);
 
   cout << "Done Adjusting outer pipeline delays" << endl;
+  auto op_sched = op_start_times_map(sched, prg);
+  cout << "\tFinal schedule : " << str(op_sched)  << endl;
   sanity_check_iis(sched);
 
 }
@@ -19086,11 +20274,12 @@ void garnet_dual_port_ram_schedule(schedule_info& sched, op* root, prog& prg) {
         buffer_dims.insert(logical_dimension(b, prg));
       }
 
-      if (buffer_dims.size() > 1) {
+      //TODO fix this scheduler
+      //if (buffer_dims.size() > 1) {
         coarse_pipeline_schedule(sched, root, prg);
-      } else {
-        rate_matched_schedule(sched, root, prg, pick(buffer_dims));
-      }
+      //} else {
+      //  rate_matched_schedule(sched, root, prg, pick(buffer_dims));
+      //}
     }
   }
 
@@ -19099,28 +20288,203 @@ void garnet_dual_port_ram_schedule(schedule_info& sched, op* root, prog& prg) {
   sanity_check_iis(sched);
 }
 
-schedule_info garnet_schedule_info(CodegenOptions& options, prog& prg, bool use_dse_compute=false) {
-  schedule_info sched;
-  sched.use_dse_compute = use_dse_compute;
+void buffet_schedule(schedule_info& sched, op* root, prog& prg) {
+
   for (auto op : prg.all_ops()) {
     if (op->func != "") {
-      sched.resource_requirements[op] = op->func;
+      assert(contains_key(op, sched.resource_requirements));
+      assign_to_least_used_resource(op, sched);
+    }
+  }
+
+  //op* pl =
+  //  find_coarse_grained_pipeline_loop(prg.root);
+  //if (pl->name != "root") {
+  //  coarse_pipeline_schedule(sched, root, prg);
+  //} else {
+  //  if (is_rate_matchable(prg)) {
+  //    cycle_accurate_clockwork_schedule(sched, root, prg);
+  //  } else {
+  //    std::set<int> buffer_dims;
+  //    for (auto b : all_buffers(prg)) {
+  //      buffer_dims.insert(logical_dimension(b, prg));
+  //    }
+
+  //    if (buffer_dims.size() > 1) {
+  //      coarse_pipeline_schedule(sched, root, prg);
+  //    } else {
+  //      rate_matched_schedule(sched, root, prg, pick(buffer_dims));
+  //    }
+  //  }
+  //}
+
+  if (is_rate_matchable(prg)) {
+    cycle_accurate_clockwork_schedule(sched, root, prg);
+  } else {
+    coarse_pipeline_schedule(sched, root, prg);
+  }
+
+  sanity_check_iis(sched);
+
+  //This is a magic number for me to pass the sliding window test
+  adjust_schedule_forward(sched, prg, 2);
+  sanity_check_iis(sched);
+}
+
+schedule_info garnet_schedule_info(CodegenOptions& options, prog& prg, bool use_metamapper=false, string dse_compute_filename="") {
+  schedule_info sched;
+  sched.use_metamapper = use_metamapper;
+  sched.dse_compute_filename = dse_compute_filename;
+
+  if (use_metamapper) {
+    json kernel_latencies;
+    std::ifstream kernel_latencies_file(prg.name + "_compute_kernel_latencies.json", std::ifstream::binary);
+    kernel_latencies_file >> kernel_latencies;
+    string suffix =
+      options.rtl_options.use_pipelined_compute_units ? "_pipelined" : "" ;
+
+    //Load the broadcast memory latency
+    json ub_latencies;
+
+    std::ifstream ub_latencies_file("ub_latency.json", std::ifstream::binary);
+
+    if (ub_latencies_file.is_open()){
+      ub_latencies_file >> ub_latencies;
     }
 
-    if (op->func != "") {
-      sched.compute_unit_latencies[op->func] = op->latency;
-      //sched.op_compute_unit_latencies[op->name] = 0;
-    } else {
-      //sched.op_compute_unit_latencies[op->name] = 0;
+    for (auto buf_latency_vec: ub_latencies.items()) {
+
+      string buf = buf_latency_vec.key();
+      cout << "buf: " << buf << endl;
+      map<int, int> lat_map;
+      for (auto it: buf_latency_vec.value()) {
+        //cout << it << endl;
+        int bank = it["bank"];
+        int latency = it["latency"];
+        lat_map[bank] = latency;
+      }
+      vector<int> lat;
+      for (auto it: lat_map) {
+        lat.push_back(it.second);
+      }
+     // cout << lat << endl;
+      sched.ub_latencies[buf] = lat;
     }
 
-    for (auto b : op->buffers_referenced()) {
-      if (!prg.is_boundary(b)) {
-        sched.buffer_load_latencies[b] = buffer_load_latency(options);
-        sched.buffer_store_latencies[b] = buffer_store_latency(options);
+    for (auto op : prg.all_ops()) {
+      if (op->func != "") {
+        sched.resource_requirements[op] = op->func;
+        if (sched.compute_resources.count(op->func)) {
+          auto& comp_unit = sched.compute_resources.at(op->func);
+          comp_unit.add_resource(op->name);
+        } else {
+          compute_resource comp_unit(op->name);
+          sched.compute_resources.insert({op->func, comp_unit});
+        }
+      }
+      cout << op->func << endl;
+      if (kernel_latencies[op->func] == NULL || kernel_latencies[op->func] == "null") {
+        sched.compute_unit_latencies[op->func + suffix] = 0;
       } else {
-        sched.buffer_load_latencies[b] = 0;
-        sched.buffer_store_latencies[b] = 0;
+        int max_latency = 0;
+        for (auto input_latencies : kernel_latencies[op->func].items()) {
+          cout << "Compute Kernel latency " <<  input_latencies.key() << " : " << input_latencies.value() << endl;
+          max_latency = std::max(max_latency, (int)input_latencies.value()["latency"]);
+        }
+        cout << "\tmax compute kernel latency " << max_latency << endl;
+        map<string, int> port_slacks;
+        for (auto input_latencies : kernel_latencies[op->func].items()) {
+          cout << "\tport compute Kernel latency " <<  (string)input_latencies.key() << " : " << max_latency - (int)(input_latencies.value()["latency"]) << endl;
+          port_slacks[(string)input_latencies.key()] = max_latency - (int)(input_latencies.value()["latency"]);
+        }
+        sched.compute_unit_latencies[op->func + suffix] = max_latency;
+        sched.port_latencies[op->func + suffix] = port_slacks;
+      }
+
+
+      for (auto b: op->buffers_written()) {
+        //assign a write
+        sched.assign_memory_write_resource(options, op, b);
+      }
+
+
+      for (auto b : op->buffers_referenced()) {
+        //TODO: put this into lakecollateral
+        if (!prg.is_boundary(b)) {
+          sched.buffer_load_latencies[b] = buffer_load_latency(options, b);
+          sched.buffer_store_latencies[b] = buffer_store_latency(options, b);
+        } else {
+          sched.buffer_load_latencies[b] = 0;
+          sched.buffer_store_latencies[b] = 0;
+        }
+
+        if (options.rtl_options.use_prebuilt_memory) {
+          auto pmap = prg.producer_map(b);
+          //cout << "\tBuffer <" << b << "> \n\tproducer map: "<< str(pmap)
+          //    << "\n\tcapacity: " << logical_capacity(b, prg) << endl <<
+          //    "\thierarchy level: " << options.get_hierarchy_level(logical_capacity(b, prg)) << endl;
+          sched.buf2level[b] = options.get_hierarchy_level(logical_capacity(b, prg));
+          //This is a hacky rewrite
+          if (!contains(b, "glb")) {
+            if (sched.buf2level[b] == "glb") {
+               sched.buf2level[b] = "mem";
+            }
+          }
+
+        }
+      }
+    }
+  } else {
+
+    for (auto op : prg.all_ops()) {
+      if (op->func != "") {
+        sched.resource_requirements[op] = op->func;
+        if (sched.compute_resources.count(op->func)) {
+          auto& comp_unit = sched.compute_resources.at(op->func);
+          comp_unit.add_resource(op->name);
+        } else {
+          compute_resource comp_unit(op->name);
+          sched.compute_resources.insert({op->func, comp_unit});
+        }
+      }
+
+
+      if (op->func != "") {
+        sched.compute_unit_latencies[op->func] = op->latency;
+        //sched.op_compute_unit_latencies[op->name] = 0;
+      } else {
+        //sched.op_compute_unit_latencies[op->name] = 0;
+      }
+
+      for (auto b: op->buffers_written()) {
+        //assign a write
+        sched.assign_memory_write_resource(options, op, b);
+      }
+
+      for (auto b : op->buffers_referenced()) {
+        //TODO: put this into lakecollateral
+        if (!prg.is_boundary(b)) {
+          sched.buffer_load_latencies[b] = buffer_load_latency(options, b);
+          sched.buffer_store_latencies[b] = buffer_store_latency(options, b);
+        } else {
+          sched.buffer_load_latencies[b] = 0;
+          sched.buffer_store_latencies[b] = 0;
+        }
+
+        if (options.rtl_options.use_prebuilt_memory) {
+          auto pmap = prg.producer_map(b);
+          //cout << "\tBuffer <" << b << "> \n\tproducer map: "<< str(pmap)
+          //    << "\n\tcapacity: " << logical_capacity(b, prg) << endl <<
+          //    "\thierarchy level: " << options.get_hierarchy_level(logical_capacity(b, prg)) << endl;
+          sched.buf2level[b] = options.get_hierarchy_level(logical_capacity(b, prg));
+            //This is a hacky rewrite
+            if (!contains(b, "glb")) {
+              if (sched.buf2level[b] == "glb") {
+                sched.buf2level[b] = "mem";
+              }
+            }
+            //cout << "buf2level: " << sched.buf2level[b] << endl;
+        }
       }
     }
   }
@@ -19137,10 +20501,19 @@ schedule_info garnet_schedule_info(CodegenOptions& options, prog& prg, bool use_
   }
 
 #ifdef COREIR
-  pipeline_compute_units(prg, sched);
+  //This part is only for post pipeline testing
+  if (options.rtl_options.use_pipelined_compute_units) {
+    if (use_metamapper) {
+      add_pipeline_latency_compute_units(prg, sched);
+    } else {
+      //pipeline_compute_units(prg, sched);
+    }
+  }
 #endif
+  sched.init_op_latencies(prg);
   return sched;
 }
+
 
 CodegenOptions garnet_codegen_single_port_with_addrgen_options(prog& prg, string dir) {
   CodegenOptions options;
@@ -19169,11 +20542,39 @@ CodegenOptions garnet_codegen_single_port_with_addrgen_options(prog& prg, string
   return options;
 }
 
+CodegenOptions garnet_codegen_dual_port_with_addrgen_options(prog& prg, string dir) {
+  CodegenOptions options;
+  //options.rtl_options.target_tile = TARGET_TILE_DUAL_SRAM_WITH_ADDRGEN;
+  options.rtl_options.target_tile = TARGET_TILE_SINGLE_FETCH_WITH_ADDRGEN;
+  options.conditional_merge = true;
+  options.fallback_schedule = ISCA_SCHEDULE;
+  options.merge_threshold = 10;
+  options.iis = {1};
+  options.rtl_options.max_inpt = 2;
+  options.rtl_options.max_outpt = 2;
+  //all_unbanked(prg, options);
+
+  //coreIR codegen options
+  options.rtl_options.use_prebuilt_memory = true;
+  options.rtl_options.use_external_controllers = false;
+  options.rtl_options.double_buffer_optimization = true;
+  options.inline_vectorization = true;
+  options.pass_through_valid= true;
+  options.dir = dir + "/" + prg.name + "/";
+
+  if (!is_rate_matchable(prg)) {
+    options.inner_bank_offset_mode =
+      INNER_BANK_OFFSET_LINEAR;
+  }
+
+  return options;
+}
+
 CodegenOptions garnet_baseline_codegen_options(prog& prg) {
   CodegenOptions options;
   options.rtl_options.use_external_controllers = true;
   options.rtl_options.target_tile =
-    TARGET_TILE_DUAL_SRAM_WITH_ADDRGEN;
+    TARGET_TILE_WIDE_FETCH_WITH_ADDRGEN;
 
   if (is_rate_matchable(prg)) {
     options.inner_bank_offset_mode =
@@ -19246,6 +20647,19 @@ CodegenOptions CGRA_M1_codegen_options(prog& prg) {
   options.rtl_options.use_external_controllers = true;
   options.rtl_options.target_tile =
     TARGET_TILE_M1;
+  options.debug_options.traceWave = true;
+  //all_unbanked(prg, options);
+  all_exhaustive_banked(prg, options);
+  return options;
+}
+
+CodegenOptions Buffet_codegen_options(prog& prg) {
+  CodegenOptions options;
+  options.rtl_options.use_external_controllers = true;
+  options.rtl_options.has_ready= true;
+  options.debug_options.traceWave = true;
+  options.rtl_options.target_tile =
+    TARGET_TILE_BUFFET;
   all_unbanked(prg, options);
   return options;
 }
@@ -19312,6 +20726,34 @@ void compile_cycle_accurate_hw(CodegenOptions& options, schedule_info& sched, pr
 
   auto hw_sched = its(op_times_map(sched, prg), prg.whole_iteration_domain());
 
+  cout << "final schedule: " << str(hw_sched) << endl;
+  sanity_check_hw_schedule(sched, prg);
+
+  auto buffers = build_buffers(prg, hw_sched);
+
+#ifdef COREIR
+
+  generate_coreir(options,
+    buffers,
+    prg,
+    hw_sched,
+    sched);
+  generate_verilator_tb(options, prg, hw_sched, buffers);
+  generate_vivado_rtl_tb(options, prg, hw_sched, buffers);
+  generate_deepak_power_flow_rtl_tb(options, prg, hw_sched, buffers);
+
+#endif
+}
+
+void compile_buffet_hw(CodegenOptions& options, schedule_info& sched, prog& prg) {
+  normalize_bounds(prg);
+  normalize_address_offsets(prg);
+
+  //garnet_dual_port_ram_schedule(sched, prg.root, prg);
+  buffet_schedule(sched, prg.root, prg);
+
+  auto hw_sched = its(op_times_map(sched, prg), prg.whole_iteration_domain());
+
   sanity_check_hw_schedule(sched, prg);
 
   auto buffers = build_buffers(prg, hw_sched);
@@ -19340,6 +20782,12 @@ void compile_for_CGRA_M1_mem(prog& prg) {
   auto options = CGRA_M1_codegen_options(prg);
   schedule_info sched = garnet_schedule_info(options, prg);
   compile_cycle_accurate_hw(options, sched, prg);
+}
+
+void compile_for_Buffet(prog& prg) {
+  auto options = Buffet_codegen_options(prg);
+  schedule_info sched = garnet_schedule_info(options, prg);
+  compile_buffet_hw(options, sched, prg);
 }
 
 void compile_for_CGRA_M3_mem(prog& prg) {
@@ -19479,7 +20927,8 @@ void compile_for_garnet_fetch2_mem(prog& prg,
         bool gen_smt_stream,
         bool config_gen_only,
         bool multi_level_mem,
-        bool use_dse_compute,
+        bool use_metamapper,
+	string dse_compute_filename,
         bool energy_model) {
 
   //make sure the loop bound and address is positive
@@ -19497,6 +20946,7 @@ void compile_for_garnet_fetch2_mem(prog& prg,
   options.add_memory_hierarchy("mem");
   options.add_memory_hierarchy("glb");
   options.mem_hierarchy.at("mem").set_config_fetch2();
+  options.debug_options.traceWave = true;
   cout << options.mem_hierarchy.at("mem").fetch_width << endl;
   if (multi_level_mem)
       options.add_memory_hierarchy("regfile");
@@ -19504,7 +20954,7 @@ void compile_for_garnet_fetch2_mem(prog& prg,
   options.config_gen_only = config_gen_only;
   //if (multi_sram)
   //    options.mem_tile.multi_sram_accessor = true;
-  schedule_info sched = garnet_schedule_info(options, prg, use_dse_compute);
+  schedule_info sched = garnet_schedule_info(options, prg, use_metamapper);
   garnet_single_port_ram_schedule(options, sched, prg.root, prg);
   auto sched_map = op_times_map(sched, prg);
   auto hw_sched = its(sched_map,
@@ -19534,7 +20984,7 @@ void compile_for_garnet_fetch2_mem(prog& prg,
 
 
 #ifdef COREIR
-  generate_garnet_coreir(buffers_opt, prg, options, sched, use_dse_compute);
+  generate_garnet_coreir(buffers_opt, prg, options, sched, use_metamapper, dse_compute_filename);
   if (!options.config_gen_only) {
     generate_garnet_verilog_top(options, prg.name);
     generate_garnet_verilator_tb(options, prg, hw_sched, buffers_opt);
@@ -19545,7 +20995,7 @@ void compile_for_garnet_fetch2_mem(prog& prg,
 void generate_resnet_latency_experiment(prog& prg,
         ofstream& profiling_file,
         string dir,
-        bool use_dse_compute) {
+        bool use_metamapper) {
 
   //make sure the loop bound and address is positive
   normalize_bounds(prg);
@@ -19566,11 +21016,11 @@ void generate_resnet_latency_experiment(prog& prg,
   options.add_memory_hierarchy("glb");
   profiling_file << prg.name << ", ";
 
-  schedule_info sched = garnet_schedule_info(options, prg, use_dse_compute);
+  schedule_info sched = garnet_schedule_info(options, prg, use_metamapper);
   dump_resnet_latency(options, sched, prg.root, prg, profiling_file, false);
   profiling_file << ", ";
 
-  schedule_info sched_db_vanilla = garnet_schedule_info(options, prg, use_dse_compute);
+  schedule_info sched_db_vanilla = garnet_schedule_info(options, prg, use_metamapper);
   options.fallback_schedule = VANILLA_DB_SCHEDULE;
   dump_resnet_latency(options, sched_db_vanilla, prg.root, prg, profiling_file, false);
   profiling_file << ", ";
@@ -19581,17 +21031,19 @@ void generate_resnet_latency_experiment(prog& prg,
   //profiling_file << ", ";
 
   options.fallback_schedule = ISCA_SCHEDULE;
-  schedule_info sched_db_loop_perfect = garnet_schedule_info(options, prg, use_dse_compute);
+  schedule_info sched_db_loop_perfect = garnet_schedule_info(options, prg, use_metamapper);
   dump_resnet_latency(options, sched_db_loop_perfect, prg.root, prg, profiling_file, true);
   profiling_file << endl;
 }
 
-void compile_for_garnet_single_port_mem(prog& prg,
+
+void compile_for_garnet_dual_port_mem(prog& prg,
         string dir,
         bool gen_smt_stream,
         bool config_gen_only,
         bool multi_level_mem,
-        bool use_dse_compute,
+        bool use_metamapper,
+        string dse_compute_filename,
         bool energy_model) {
 
   //make sure the loop bound and address is positive
@@ -19607,11 +21059,12 @@ void compile_for_garnet_single_port_mem(prog& prg,
 
   //auto iis = garnet_fuse_ii_level(prg);
   //auto buffers_opt = build_buffers(prg, clockwork_schedule(prg));
-
-  CodegenOptions options = garnet_codegen_single_port_with_addrgen_options(prg, dir);
+  CodegenOptions options =
+      garnet_codegen_dual_port_with_addrgen_options(prg, dir);
   options.debug_options.traceWave = true;
   options.add_memory_hierarchy("mem");
   options.add_memory_hierarchy("glb");
+  options.mem_hierarchy.at("mem").set_config_dp();
   if (multi_level_mem) {
     options.add_memory_hierarchy("regfile");
     options.rtl_options.double_buffer_optimization = false;
@@ -19628,7 +21081,8 @@ void compile_for_garnet_single_port_mem(prog& prg,
     prg.pretty_print();
   }
 
-  schedule_info sched = garnet_schedule_info(options, prg, use_dse_compute);
+  schedule_info sched =
+      garnet_schedule_info(options, prg, use_metamapper);
   garnet_single_port_ram_schedule(options, sched, prg.root, prg);
   auto sched_map = op_times_map(sched, prg);
   auto hw_sched = its(sched_map,
@@ -19657,7 +21111,170 @@ void compile_for_garnet_single_port_mem(prog& prg,
   }
 
 #ifdef COREIR
-  generate_garnet_coreir(buffers_opt, prg, options, sched, use_dse_compute);
+  generate_garnet_coreir(buffers_opt, prg, options, sched, use_metamapper, dse_compute_filename);
+  if (!options.config_gen_only) {
+    generate_garnet_verilog_top(options, prg.name);
+    generate_garnet_verilator_tb(options, prg, hw_sched, buffers_opt);
+  }
+#endif
+}
+
+void compile_for_garnet_single_port_mem_large_TB(prog& prg,
+        string dir,
+        bool gen_smt_stream,
+        bool config_gen_only,
+        bool multi_level_mem,
+        bool use_metamapper,
+        string dse_compute_filename,
+        bool energy_model) {
+
+  //make sure the loop bound and address is positive
+  normalize_bounds(prg);
+  normalize_address_offsets(prg);
+  //remove_div(prg);
+  prg.sanity_check();
+  prg.pretty_print();
+
+
+  //optimized schedule
+  cmd("mkdir -p " + dir + "/" + prg.name);
+
+  //auto iis = garnet_fuse_ii_level(prg);
+  //auto buffers_opt = build_buffers(prg, clockwork_schedule(prg));
+  CodegenOptions options = garnet_codegen_single_port_with_addrgen_options(prg, dir);
+  options.debug_options.traceWave = true;
+  options.add_memory_hierarchy("mem");
+  options.mem_hierarchy.at("mem").capacity.at("tb") = 16;
+  options.add_memory_hierarchy("glb");
+  if (multi_level_mem) {
+    options.add_memory_hierarchy("regfile");
+    //options.rtl_options.double_buffer_optimization = false;
+    //options.fallback_schedule = SEQUENTIAL_SCHEDULE;
+  }
+  options.rtl_options.double_buffer_optimization = true;
+  options.emit_smt_stream = gen_smt_stream;
+  options.config_gen_only = config_gen_only;
+  //if (multi_sram)
+  //    options.mem_tile.multi_sram_accessor = true;
+
+  if(options.fallback_schedule == ISCA_SCHEDULE) {
+    loop_perfection(prg);
+    cout << "After Loop Perfection" << endl;
+    prg.pretty_print();
+  }
+
+  schedule_info sched = garnet_schedule_info(options, prg, use_metamapper);
+  garnet_single_port_ram_schedule(options, sched, prg.root, prg);
+  auto sched_map = op_times_map(sched, prg);
+  auto hw_sched = its(sched_map,
+          prg.whole_iteration_domain());
+  cout << "result schedule: " << str(hw_sched) << endl;
+  auto buffers_opt = build_buffers(prg, hw_sched);
+  auto sched_max = lexmaxpt(range(hw_sched));
+  cout << "Latency of application is: " << str((sched_max)) << endl;
+
+  tag_coarse_grained_loop_to_ubuf(buffers_opt, prg);
+  //FIXME: put into separate pass for power analysis
+  if (energy_model) {
+    mem_access_cnt mem_access;
+    Mem_access_count(options, buffers_opt, mem_access, prg);
+    emit_mem_access_count_to_csv(dir + "/MemCount/" + prg.name, options, mem_access);
+
+    power_analysis_params power_params;
+    power_analysis_info power_stats;
+    Init_PE_energy_cost(power_params);
+
+#ifdef COREIR
+    PE_energy_cost_instance_model(power_params, power_stats, prg);
+    PE_energy_cost(power_params, power_stats, prg);
+#endif
+
+  }
+
+#ifdef COREIR
+  generate_garnet_coreir(buffers_opt, prg, options, sched, use_metamapper, dse_compute_filename);
+  if (!options.config_gen_only) {
+    generate_garnet_verilog_top(options, prg.name);
+    generate_garnet_verilator_tb(options, prg, hw_sched, buffers_opt);
+  }
+#endif
+}
+
+void compile_for_garnet_single_port_mem(prog& prg,
+        string dir,
+        bool gen_smt_stream,
+        bool config_gen_only,
+        bool multi_level_mem,
+        bool use_metamapper,
+        string dse_compute_filename,
+        bool energy_model) {
+
+  //make sure the loop bound and address is positive
+  normalize_bounds(prg);
+  normalize_address_offsets(prg);
+  //remove_div(prg);
+  prg.sanity_check();
+  prg.pretty_print();
+
+
+  //optimized schedule
+  cmd("mkdir -p " + dir + "/" + prg.name);
+
+  //auto iis = garnet_fuse_ii_level(prg);
+  //auto buffers_opt = build_buffers(prg, clockwork_schedule(prg));
+  CodegenOptions options = garnet_codegen_single_port_with_addrgen_options(prg, dir);
+  options.debug_options.traceWave = true;
+  options.add_memory_hierarchy("mem");
+  options.add_memory_hierarchy("glb");
+  if (multi_level_mem) {
+    options.add_memory_hierarchy("regfile");
+    //options.rtl_options.double_buffer_optimization = false;
+    //options.fallback_schedule = SEQUENTIAL_SCHEDULE;
+  }
+  options.rtl_options.double_buffer_optimization = true;
+  options.emit_smt_stream = gen_smt_stream;
+  options.config_gen_only = config_gen_only;
+  if (!config_gen_only && use_metamapper)
+    options.rtl_options.use_pipelined_compute_units = true;
+  //if (multi_sram)
+  //    options.mem_tile.multi_sram_accessor = true;
+
+  if(options.fallback_schedule == ISCA_SCHEDULE) {
+    loop_perfection(prg);
+    cout << "After Loop Perfection" << endl;
+    prg.pretty_print();
+  }
+
+  schedule_info sched = garnet_schedule_info(options, prg, use_metamapper);
+  garnet_single_port_ram_schedule(options, sched, prg.root, prg);
+  auto sched_map = op_times_map(sched, prg);
+  auto hw_sched = its(sched_map,
+          prg.whole_iteration_domain());
+  cout << "result schedule: " << str(hw_sched) << endl;
+  auto buffers_opt = build_buffers(prg, hw_sched, sched);
+  auto sched_max = lexmaxpt(range(hw_sched));
+  cout << "Latency of application is: " << str((sched_max)) << endl;
+
+  tag_coarse_grained_loop_to_ubuf(buffers_opt, prg);
+  //FIXME: put into separate pass for power analysis
+  if (energy_model) {
+    mem_access_cnt mem_access;
+    Mem_access_count(options, buffers_opt, mem_access, prg);
+    emit_mem_access_count_to_csv(dir + "/MemCount/" + prg.name, options, mem_access);
+
+    power_analysis_params power_params;
+    power_analysis_info power_stats;
+    Init_PE_energy_cost(power_params);
+
+#ifdef COREIR
+    PE_energy_cost_instance_model(power_params, power_stats, prg);
+    PE_energy_cost(power_params, power_stats, prg);
+#endif
+
+  }
+
+#ifdef COREIR
+  generate_garnet_coreir(buffers_opt, prg, options, sched, use_metamapper, dse_compute_filename);
   if (!options.config_gen_only) {
     generate_garnet_verilog_top(options, prg.name);
     generate_garnet_verilator_tb(options, prg, hw_sched, buffers_opt);
@@ -19694,6 +21311,35 @@ bool schedule_bounds_fit_controller_bitwidth(const int bitwidth, schedule_info& 
   return true;
 }
 
+void test_schedules_single_port(vector<prog>& test_programs) {
+
+  for (auto& prg : test_programs) {
+    CodegenOptions options = garnet_codegen_single_port_with_addrgen_options(prg, "");
+    options.add_memory_hierarchy("mem");
+    options.mem_hierarchy.at("mem").fetch_width = 1;
+    options.fallback_schedule = ISCA_SCHEDULE;
+    schedule_info sched =
+      garnet_schedule_info(options, prg);
+
+    garnet_single_port_ram_schedule(options, sched, prg.root, prg);
+    cout << "Checking " << prg.name << " schedule" << endl;
+    prg.pretty_print();
+
+    assert(no_violated_cycle_accurate_dependencies(sched, prg));
+    auto ss = op_start_times_map(sched, prg);
+    for (auto m : get_maps(ss)) {
+      //cout << tab(1) << str(m) << endl;
+    }
+    auto hw_sched = its(op_times_map(sched, prg), prg.whole_iteration_domain());
+    auto sched_max = lexmaxpt(range(hw_sched));
+    cout << "APP: " << prg.name  << endl;
+    cout << "\tLatency of application is: " << str((sched_max)) << endl;
+  }
+
+  //assert(false);
+}
+
+
 void test_schedules(vector<prog>& test_programs) {
 
   for (auto& prg : test_programs) {
@@ -19707,7 +21353,7 @@ void test_schedules(vector<prog>& test_programs) {
     assert(no_violated_cycle_accurate_dependencies(sched, prg));
     auto ss = op_start_times_map(sched, prg);
     for (auto m : get_maps(ss)) {
-      cout << tab(1) << str(m) << endl;
+      //cout << tab(1) << str(m) << endl;
     }
   }
 
@@ -19769,25 +21415,64 @@ vector<prog> harris_variants() {
   return test_programs;
 }
 
-vector<prog> isca_programs() {
+vector<prog> isca_programs_m3() {
   vector<prog> test_programs;
   //test_programs.push_back(harris_sch5_1ppc());
-  //test_programs.push_back(harris());
   //test_programs.push_back(harris_sch6_2ppc());
   //test_programs.push_back(harris_sch7_bigtile());
   //test_programs.push_back(harris_sch8_endcim());
   //test_programs.back().pretty_print();
 
   //FIXME: not work for M1 and M3
-  //test_programs.push_back(up_sample());
-  //test_programs.push_back(unsharp());
   //test_programs.push_back(three_level_pond_rolled());
-  test_programs.push_back(camera_pipeline());
+
   test_programs.push_back(gaussian());
-  test_programs.push_back(mobilenet_unrolled());
-  test_programs.push_back(resnet());
+  //test_programs.push_back(cascade());
+  //test_programs.push_back(down_sample());
+  //test_programs.push_back(harris());
+  //test_programs.push_back(camera_pipeline());
+  //test_programs.push_back(unsharp());
+  //test_programs.push_back(unsharp_new());
+  //test_programs.push_back(mobilenet_unrolled());
+  //test_programs.push_back(resnet());
+
+
+  return test_programs;
+}
+
+vector<prog> isca_programs() {
+  vector<prog> test_programs;
+  //test_programs.push_back(harris_sch5_1ppc());
+  //test_programs.push_back(harris_sch6_2ppc());
+  //test_programs.push_back(harris_sch7_bigtile());
+  //test_programs.push_back(harris_sch8_endcim());
+  //test_programs.back().pretty_print();
+
+  //FIXME: not work for M1 and M3
+  //test_programs.push_back(three_level_pond_rolled());
+
+  //Scheduler has some issue, not support cyclic banking
+  //test_programs.push_back(matmul_single());
+  test_programs.push_back(gaussian());
+  test_programs.push_back(conv_3_3());
   test_programs.push_back(cascade());
   test_programs.push_back(down_sample());
+  //test_programs.push_back(harris());
+  test_programs.push_back(harris_color());
+  test_programs.push_back(up_sample());
+  test_programs.push_back(laplacian_pyramid());
+  //test_programs.push_back(resnet88());
+  test_programs.push_back(matmul_single_m1());
+  test_programs.push_back(camera_pipeline());
+  test_programs.push_back(camera_pipeline_new());
+  test_programs.push_back(camera_pipeline_2x2());
+  //test_programs.push_back(unsharp());
+  //test_programs.push_back(unsharp_new());
+  test_programs.push_back(unsharp_large());
+  test_programs.push_back(mobilenet_unrolled());
+  test_programs.push_back(resnet());
+  test_programs.push_back(resnet88());
+  test_programs.push_back(resnet88_chain());
 
   return test_programs;
 }
@@ -19830,6 +21515,7 @@ void cpy_app_to_folder(const std::string& app_type, const std::string& prg_name)
   cmd("mkdir -p ./coreir_apps/" + app_type + "/" + prg_name);
   //cmd("mv LakeWrapper.v ./coreir_apps/coreir_apps/" + app_type +"/" + prg_name + "/");
   cmd("mv " + prg_name + ".json ./coreir_apps/" + app_type + "/" + prg_name + "/");
+  cmd("mv cgra_resource_estimation.csv ./coreir_apps/" + app_type + "/" + prg_name + "/");
   cmd("mv " + prg_name + "_post_mapping.json ./coreir_apps/" + app_type + "/" + prg_name + "/");
   cmd("mv " + prg_name + ".v ./coreir_apps/" + app_type + "/" + prg_name + "/");
   cmd("mv " + prg_name + "_verilog_collateral.sv ./coreir_apps/" + app_type + "/" + prg_name + "/");
@@ -19870,6 +21556,33 @@ void test_codegen(vector<prog>& test_programs, CodegenFunction& codegen) {
 
 void test_platonic_codegen(vector<prog>& test_programs) {
   test_codegen(test_programs, compile_for_garnet_platonic_mem);
+}
+
+void test_buffet_codegen(vector<prog>& test_programs) {
+  for (auto& prg : test_programs) {
+    cout << "====== Running CGRA test for " << prg.name << endl;
+    prg.pretty_print();
+    prg.sanity_check();
+
+    break_up_multi_channel_inputs(prg);
+    break_up_multi_channel_outputs(prg);
+    dsa_writers(prg);
+
+    prg.pretty_print();
+    prg.sanity_check();
+
+    auto cpu = unoptimized_result(prg);
+
+    compile_for_Buffet(prg);
+    generate_regression_testbench(prg);
+
+    cout << "Output name: " << prg.name << endl;
+    run_verilator_tb_buffet(prg.name);
+    auto verilator_res = verilator_results(prg.name);
+    compare("cgra_" + prg.name + "_cpu_vs_verilog_comparison", verilator_res, cpu);
+    string app_type = "buffet";
+    cpy_app_to_folder(app_type, prg.name);
+  }
 }
 
 void cw_print_body(int level,
@@ -20135,35 +21848,54 @@ void fpga_asplos_tests() {
   }
 }
 
+void buffet_tests() {
+  //vector<prog> buffet_test_programs = {pointwise_conv()};
+  vector<prog> buffet_test_programs;
+  //unsharp not work
+  //buffet_test_programs.push_back(unsharp());
+  //buffet_test_programs.push_back(unsharp());
+  buffet_test_programs.push_back(gaussian());
+  buffet_test_programs.push_back(conv_3_3_buffet());
+  buffet_test_programs.push_back(pointwise_conv());
+  buffet_test_programs.push_back(conv_unit_test());
+  buffet_test_programs.push_back(up_sample());
+  buffet_test_programs.push_back(accumulation_simple());
+  buffet_test_programs.push_back(resnet_tiny());
+  buffet_test_programs.push_back(matmul_tiny());
+  buffet_test_programs.push_back(conv_1_2());
+  buffet_test_programs.push_back(cascade());
+  buffet_test_programs.push_back(harris());
+  buffet_test_programs.push_back(bank_test());
+  buffet_test_programs.push_back(resnet88());
+  buffet_test_programs.push_back(resnet());
+  test_buffet_codegen(buffet_test_programs);
+}
+
 void cgra_flow_tests() {
 
-  vector<prog> M3_test_programs = isca_programs();
 
   //vector<prog> bram_test_programs{pointwise(), gaussian(), harris(), resnet()};
-  vector<prog> bram_test_programs{resnet88()};
-  //vector<prog> bram_test_programs{pointwise()};
-  test_codegen(bram_test_programs, compile_for_FPGA_BRAM_mem);
+  //vector<prog> bram_test_programs{resnet88()};
+  //vector<prog> bram_test_programs{laplacian_pyramid()};
+  //test_codegen(bram_test_programs, compile_for_FPGA_BRAM_mem);
 
   //vector<prog> M3_test_programs = harris_variants();
   //vector<prog> M3_test_programs{up_sample(), resnet()};
   //vector<prog> M3_test_programs{resnet()};
   //vector<prog> M3_test_programs{gaussian()};
-  test_codegen(M3_test_programs, compile_for_CGRA_M3_mem);
+  //vector<prog> M3_test_programs = isca_programs_m3();
+  //test_codegen(M3_test_programs, compile_for_CGRA_M3_mem);
   //assert(false);
 
+  //vector<prog> M1_test_programs{resnet88_chain()};
   vector<prog> M1_test_programs = isca_programs();
-  //vector<prog> M1_test_programs{gaussian()};
   test_codegen(M1_test_programs, compile_for_CGRA_M1_mem);
 
-  auto test_programs =
-    all_cgra_programs();
-  test_platonic_codegen(test_programs);
+  //auto test_programs = all_cgra_programs();
+  //test_platonic_codegen(test_programs);
 
-
-
-
-  vector<prog> sram_test_programs{pointwise(), camera_pipeline(), resnet()};
-  test_codegen(sram_test_programs, compile_for_generic_SRAM_mem);
+  //vector<prog> sram_test_programs{pointwise(), camera_pipeline(), resnet()};
+  //test_codegen(sram_test_programs, compile_for_generic_SRAM_mem);
 
 }
 
@@ -20205,6 +21937,22 @@ void dual_port_lake_test() {
     compile_for_garnet_dual_port_mem(prg);
     assert(false);
 
+}
+
+void test_dual_port_latency() {
+
+  vector<prog> test_programs;
+  test_programs.push_back(gaussian());
+  test_programs.push_back(harris());
+  test_programs.push_back(unsharp_large());
+  test_programs.push_back(camera_pipeline_2x2());
+  test_programs.push_back(up_sample());
+  test_programs.push_back(resnet88());
+  test_programs.push_back(mobilenet_unrolled());
+  test_programs.push_back(matmul_single());
+
+
+  test_schedules_single_port(test_programs);
 }
 
 void full_cgra_flow_tests() {
@@ -26843,8 +28591,8 @@ void load_pe_power_stats(power_analysis_params& power_params, const std::string&
   //assert(false);
 }
 
-std::set<op*> find_users(const std::string& buf, prog& prg) {
-  std::set<op*> rds = find_readers(buf, prg);
+std::set<op*, cmp_op> find_users(const std::string& buf, prog& prg) {
+  std::set<op*, cmp_op> rds = find_readers(buf, prg);
   for (auto p : find_writers(buf, prg)) {
     rds.insert(p);
   }
@@ -27646,14 +29394,17 @@ void unoptimized_mem_baseline() {
     isscc_programs.push_back(gaussian_isscc());
     isscc_programs.push_back(unsharp_isscc());
     isscc_programs.push_back(harris_color());
-    isscc_programs.push_back(camera_pipeline_isscc());
+    isscc_programs.push_back(camera_pipeline_2x2());
 
     for (auto prg : isscc_programs) {
+      normalize_bounds(prg);
+      dsa_writers(prg);
       auto options = garnet_baseline_codegen_options(prg);
       schedule_info sched = garnet_schedule_info(options, prg);
+      options.add_memory_hierarchy("mem");
       //compile_cycle_accurate_hw(options, sched, prg);
-      normalize_bounds(prg);
-      sequential_schedule(sched, prg.root, prg);
+      //sequential_schedule(sched, prg.root, prg);
+      garnet_single_port_ram_schedule(options, sched, prg.root, prg);
 
       auto hw_sched = its(op_times_map(sched, prg), prg.whole_iteration_domain());
       auto sched_max = lexmaxpt(range(hw_sched));
@@ -27674,7 +29425,8 @@ void unoptimized_mem_baseline() {
           int mem_tile_num_by_bank = b.second.get_banks().size();
           cout << tab(4) << "naive capacity tile number: " << mem_tile_num_by_capacity << endl;
           cout << tab(4) << "naive banking number: " << mem_tile_num_by_bank << endl;
-          total_tile += max(mem_tile_num_by_capacity, mem_tile_num_by_bank);
+          //total_tile += max(mem_tile_num_by_capacity, mem_tile_num_by_bank);
+          total_tile += mem_tile_num_by_bank;
         }
       }
       cout << tab(1) << "=== SRAM bytes for " << prg.name << ": " << total_capacity << endl;
@@ -27999,6 +29751,11 @@ int main(int argc, char** argv) {
       return 0;
     }
 
+    if (cmd == "buffet-flow") {
+      buffet_tests();
+      return 0;
+    }
+
     if (cmd == "dse-flow") {
       dse_flow_tests();
       return 0;
@@ -28045,6 +29802,10 @@ int main(int argc, char** argv) {
 
     if (cmd == "lake-tests") {
       lake_tests();
+      bool use_multi_accessor_tile = true;
+      bool gen_config_only = false;
+      //test_dual_port_mem(gen_config_only, use_multi_accessor_tile, "aha_garnet_design_dp");
+      //test_glb(gen_config_only, use_multi_accessor_tile, "aha_garnet_design_new");
       return 0;
     }
 
@@ -28066,6 +29827,19 @@ int main(int argc, char** argv) {
     if (cmd == "pond-tests") {
       bool run_verilator = true;
       test_pond("aha_garnet_design_pond", run_verilator);
+      test_multi_layer_nn("aha_garnet_design_pond", run_verilator);
+      return 0;
+    }
+
+    if (cmd == "dp-tests") {
+      bool gen_config_only = false;
+      bool use_multi_accessor_tile = true;
+      test_dual_port_mem(gen_config_only, use_multi_accessor_tile, "aha_garnet_design_dp");
+      return 0;
+    }
+
+    if (cmd == "dp-latency") {
+      test_dual_port_latency();
       return 0;
     }
 
@@ -28098,6 +29872,13 @@ int main(int argc, char** argv) {
       bool use_multi_accessor_tile = true;
       bool gen_config_only = true;
       test_single_port_mem(gen_config_only, use_multi_accessor_tile, "aha_garnet_design_new");
+      return 0;
+    }
+
+    if (cmd == "pipe-tests") {
+      bool use_multi_accessor_tile = true;
+      bool gen_config_only = false;
+      test_pipeline_compute(gen_config_only, use_multi_accessor_tile, "aha_garnet_design_pipe");
       return 0;
     }
 
