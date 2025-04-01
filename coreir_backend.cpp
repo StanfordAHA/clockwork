@@ -2816,7 +2816,6 @@ CoreIR::Module*  generate_coreir_without_ctrl(CodegenOptions& options,
 
       lower_to_garnet_implementation(options, buf.second, impl, hwinfo);
 
-
       cout << "Before bank merging and rewrite: " << buf_cnt << endl;
 
       cout << "PRINTING IMPLEMENTATION (0)" << endl;

@@ -3965,10 +3965,10 @@ void UBuffer::generate_sreg_and_wire(CodegenOptions& options, UBufferImpl& impl,
         // Only handling data at the lowest level
         for(auto downstream_port : all_downstream_ports){
           cout << "HANDLING: " << downstream_port << endl;
-          cout << "PRINTING PRECURSOR_EXTRA KEYS" << endl;
-          for(auto it__ : precursor_extra){
-            cout << it__.first << endl;
-          }
+          // cout << "PRINTING PRECURSOR_EXTRA KEYS" << endl;
+          // for(auto it__ : precursor_extra){
+          //   cout << it__.first << endl;
+          // }
           // Check if downstream_port is in precursor_extra
           if(precursor_extra.find(downstream_port) == precursor_extra.end()){
             cout << "NOT IN PRECURSOR EXTRA --- means no extra data for this!!!: " << downstream_port << endl;
@@ -4004,7 +4004,20 @@ void UBuffer::generate_sreg_and_wire(CodegenOptions& options, UBufferImpl& impl,
             }
           }
         }
-        extra_data_locations[reg_name] = num_to_add;
+        cout << "Adding Data === Reg Name: " << reg_name << endl;
+        // Algorithm greedily puts as much data at each point as possible, so we should only ever
+        // place data in a register one time...
+        // Check if this reg_name is in the extra data locations...
+        if(extra_data_locations.find(reg_name) != extra_data_locations.end()){
+          cout << "Already in extra data locations..." << endl;
+          cout << extra_data_locations[reg_name] << endl;
+          // Should be greater than 0 and less than num_to_add
+          // assert((extra_data_locations[reg_name] > 0) && (extra_data_locations[reg_name] > 0));
+        }
+        else{
+          cout << "Putting this much data in the reg: " << num_to_add << endl;
+          extra_data_locations[reg_name] = num_to_add;
+        }
 
         // }
       }
