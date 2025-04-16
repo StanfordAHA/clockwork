@@ -1219,3 +1219,10 @@ bfloat16_t int8tobf16_unpack_low(uint16_t in0) {
 
   return bfloat16_t(bfloat16_val);
 }
+
+
+static inline
+uint16_t bit8_pack(bfloat16_t in0, bfloat16_t in1) {
+    uint16_t packed = (((uint16_t)(in0 & 0xFF)) << 8) | (in1 & 0xFF);
+    return packed;
+}
