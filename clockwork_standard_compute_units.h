@@ -1089,6 +1089,18 @@ bfloat16_t log_bf16(bfloat16_t a) {
   return result_bf16;
 }
 
+// Absolute maximum of two bfloat16 abs values
+static inline
+bfloat16_t abs_max(bfloat16_t a, bfloat16_t b) {
+  float e = bfloat16_to_float(a.to_bits());
+  float f = bfloat16_to_float(b.to_bits());
+  float abs_e = fabsf(e);
+  float abs_f = fabsf(f);
+  float result = (abs_e >= abs_f) ? abs_e : abs_f;
+  bfloat16_t result_bf16 = bfloat16_t::make_from_bits(round_to_even(result));
+  return result_bf16;
+}
+
 // convert bfloat16 to int8 and pack two int8 values into one 16-bit value
 static inline
 bfloat16_t bf16toint8_pack(bfloat16_t in0, bfloat16_t in1) {
