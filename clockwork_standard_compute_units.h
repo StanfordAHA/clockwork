@@ -1101,137 +1101,23 @@ bfloat16_t abs_max(bfloat16_t a, bfloat16_t b) {
   return result_bf16;
 }
 
-// convert bfloat16 to int8 and pack two int8 values into one 16-bit value
+// Extract the upper 8 bits of a bfloat16 value and zero-extend to 16 bits
 static inline
-bfloat16_t bf16toint8_pack(bfloat16_t in0, bfloat16_t in1) {
-    // Extract underlying 16-bit values from the bfloat16_t inputs.
-    uint16_t a = (uint16_t)in0;
-    uint16_t b = (uint16_t)in1;
-
-    // Process in0 (bf16 to int8 conversion)
-    uint16_t sign_a = a & 0x8000;
-    uint16_t mant_a = (a & 0x007F) | 0x0080;
-    uint16_t exp_a = (a & 0x7F80) >> 7;
-    int biased_exp_a = (int) exp_a;
-    int unbiased_exp_a = biased_exp_a - 127;
-    uint32_t mant_shift_a = (unbiased_exp_a < 0) ? 0 : ((uint32_t)mant_a << unbiased_exp_a);
-    uint8_t unsigned_res_a = (uint8_t)((mant_shift_a >> 7) & 0xFF);
-    int8_t int8_a = (sign_a == 0x8000) ? -((int8_t)unsigned_res_a) : ((int8_t)unsigned_res_a);
-
-    // Process in1 (bf16 to int8 conversion)
-    uint16_t sign_b = b & 0x8000;
-    uint16_t mant_b = (b & 0x007F) | 0x0080;
-    uint16_t exp_b = (b & 0x7F80) >> 7;
-    int biased_exp_b = (int) exp_b;
-    int unbiased_exp_b = biased_exp_b - 127;
-    uint32_t mant_shift_b = (unbiased_exp_b < 0) ? 0 : ((uint32_t)mant_b << unbiased_exp_b);
-    uint8_t unsigned_res_b = (uint8_t)((mant_shift_b >> 7) & 0xFF);
-    int8_t int8_b = (sign_b == 0x8000) ? -((int8_t)unsigned_res_b) : ((int8_t)unsigned_res_b);
-
-    // Pack the two int8 values into one 16-bit value.
-    uint16_t packed = (((uint16_t)((uint8_t)int8_a)) << 8) | ((uint8_t)int8_b);
-
-    // Construct and return a bfloat16_t from the packed 16-bit value.
-    return bfloat16_t(packed);
+uint16_t bit8_unpack_high(bfloat16_t in0) {
+  // Reinterpret the bfloat16 as its raw 16-bit representation
+  uint16_t raw = *(uint16_t*)&in0;
+  // Shift down to get bits [15:8], mask to 8 bits, upper bits are zero
+  return (raw >> 8) & 0xFF;
 }
 
-// convert int8 to bfloat16 and unpack two bfloat16 values from one 16-bit value
+// Extract the lower 8 bits of a bfloat16 value and zero-extend to 16 bits
 static inline
-bfloat16_t int8tobf16_unpack_high(uint16_t in0) {
-  // Extract upper 8 bits as int8
-  int8_t int8_val = ((uint16_t)in0 >> 8) & 0xFF;
-
-  // Convert int8 to bfloat16
-  uint16_t sign = 0;
-  uint16_t abs_input;
-  if (int8_val < 0) {
-      sign = 0x8000;
-      abs_input = -int8_val;
-  } else {
-      abs_input = int8_val;
-  }
-  int16_t scale = -127;
-  if (abs_input & 0x01) scale = 0;
-  if (abs_input & 0x02) scale = 1;
-  if (abs_input & 0x04) scale = 2;
-  if (abs_input & 0x08) scale = 3;
-  if (abs_input & 0x10) scale = 4;
-  if (abs_input & 0x20) scale = 5;
-  if (abs_input & 0x40) scale = 6;
-  if (abs_input & 0x80) scale = 7;
-  if (abs_input & 0x100) scale = 8;
-  if (abs_input & 0x200) scale = 9;
-  if (abs_input & 0x400) scale = 10;
-  if (abs_input & 0x800) scale = 11;
-  if (abs_input & 0x1000) scale = 12;
-  if (abs_input & 0x2000) scale = 13;
-  if (abs_input & 0x4000) scale = 14;
-  if (abs_input & 0x8000) scale = 15;
-
-  uint16_t normmant_mul_left = abs_input;
-  uint16_t normmant_mul_right = 15 - scale;
-  uint16_t normmant_mask = 0x7F00;
-  uint16_t normmant;
-  if (scale >= 0) {
-      normmant = ((normmant_mul_left << normmant_mul_right) & normmant_mask);
-  } else {
-      normmant = 0;
-  }
-  normmant = normmant >> 8;
-  uint16_t biased_scale = scale + 127;
-  uint16_t bfloat16_val = (sign | ((biased_scale << 7) & (0xFF << 7)) | normmant);
-
-  return bfloat16_t(bfloat16_val);
+uint16_t bit8_unpack_low(bfloat16_t in0) {
+  // Reinterpret the bfloat16 as its raw 16-bit representation
+  uint16_t raw = *(uint16_t*)&in0;
+  // Mask to keep bits [7:0], upper bits are zero
+  return raw & 0xFF;
 }
-
-static inline
-bfloat16_t int8tobf16_unpack_low(uint16_t in0) {
-  // Extract lower 8 bits as int8
-  int8_t int8_val = (uint16_t)in0 & 0xFF;
-
-  // Convert int8 to bfloat16
-  uint16_t sign = 0;
-  uint16_t abs_input;
-  if (int8_val < 0) {
-      sign = 0x8000;
-      abs_input = -int8_val;
-  } else {
-      abs_input = int8_val;
-  }
-  int16_t scale = -127;
-  if (abs_input & 0x01) scale = 0;
-  if (abs_input & 0x02) scale = 1;
-  if (abs_input & 0x04) scale = 2;
-  if (abs_input & 0x08) scale = 3;
-  if (abs_input & 0x10) scale = 4;
-  if (abs_input & 0x20) scale = 5;
-  if (abs_input & 0x40) scale = 6;
-  if (abs_input & 0x80) scale = 7;
-  if (abs_input & 0x100) scale = 8;
-  if (abs_input & 0x200) scale = 9;
-  if (abs_input & 0x400) scale = 10;
-  if (abs_input & 0x800) scale = 11;
-  if (abs_input & 0x1000) scale = 12;
-  if (abs_input & 0x2000) scale = 13;
-  if (abs_input & 0x4000) scale = 14;
-  if (abs_input & 0x8000) scale = 15;
-
-  uint16_t normmant_mul_left = abs_input;
-  uint16_t normmant_mul_right = 15 - scale;
-  uint16_t normmant_mask = 0x7F00;
-  uint16_t normmant;
-  if (scale >= 0) {
-      normmant = ((normmant_mul_left << normmant_mul_right) & normmant_mask);
-  } else {
-      normmant = 0;
-  }
-  normmant = normmant >> 8;
-  uint16_t biased_scale = scale + 127;
-  uint16_t bfloat16_val = (sign | ((biased_scale << 7) & (0xFF << 7)) | normmant);
-
-  return bfloat16_t(bfloat16_val);
-}
-
 
 static inline
 uint16_t bit8_pack(bfloat16_t in0, bfloat16_t in1) {
