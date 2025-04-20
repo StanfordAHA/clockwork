@@ -1121,6 +1121,18 @@ uint16_t bit8_unpack_low(bfloat16_t in0) {
 
 static inline
 uint16_t bit8_pack(bfloat16_t in0, bfloat16_t in1) {
-    uint16_t packed = (((uint16_t)(in0 & 0xFF)) << 8) | (in1 & 0xFF);
-    return packed;
+  uint16_t packed = (((uint16_t)(in0 & 0xFF)) << 8) | (in1 & 0xFF);
+  return packed;
+}
+
+static inline
+uint16_t get_shared_exp(bfloat16_t in0) {
+  uint16_t shared_exp;
+  uint8_t exp_field = (in0 >> 7) & 0xFF;
+  if (exp_field == 0) {
+      shared_exp = 127;
+  } else {
+      shared_exp = uint16_t(static_cast<uint8_t>(exp_field) - 6);
+  }
+  return shared_exp;
 }
