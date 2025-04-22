@@ -1136,3 +1136,12 @@ uint16_t get_shared_exp(bfloat16_t in0) {
   }
   return shared_exp;
 }
+
+static inline
+// E8M0 quantization division where in0 is bf16 and in1 is biased e8m0
+uint16_t e8m0_quant(bfloat16_t in0, uint16_t in1) {
+  float in0_float = float(in0);
+  float scale = powf(2.0f, static_cast<float>(in1 - 127));
+  int8_t quantized_value = static_cast<int8_t>(roundf(in0_float / scale));
+  return static_cast<uint16_t>(quantized_value);
+}
