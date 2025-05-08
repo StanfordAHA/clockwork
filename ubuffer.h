@@ -1302,29 +1302,34 @@ class UBuffer {
           // Do some string analysis to calculate the scalar deps
           auto raw_string = str(raw_validity);
           auto war_string = str(war_validity);
+          try {
+            auto raw_vec = extract_dep_vec_from_dep_str(raw_string);
+            auto war_vec = extract_dep_vec_from_dep_str(war_string);
 
-          auto raw_vec = extract_dep_vec_from_dep_str(raw_string);
-          auto war_vec = extract_dep_vec_from_dep_str(war_string);
+            if(raw_vec.size() == 0){
+              cout << "RAW vec is empty" << endl;
 
-          if(raw_vec.size() == 0){
-            cout << "RAW vec is empty" << endl;
+              cout << "Writer Access Map: " << endl << str(writer_access_map) << endl;
+              cout << "Writer Schedule Map: " << endl << str(writer_sched_map) << endl;
+              cout << "Writer Domain: " << endl << str(writer_domain) << endl;
 
-            cout << "Writer Access Map: " << endl << str(writer_access_map) << endl;
-            cout << "Writer Schedule Map: " << endl << str(writer_sched_map) << endl;
-            cout << "Writer Domain: " << endl << str(writer_domain) << endl;
+              cout << "Reader Access Map: " << endl << str(reader_access_map) << endl;
+              cout << "Reader Schedule Map: " << endl << str(reader_sched_map) << endl;
+              cout << "Reader Domain: " << endl << str(reader_domain) << endl;
 
-            cout << "Reader Access Map: " << endl << str(reader_access_map) << endl;
-            cout << "Reader Schedule Map: " << endl << str(reader_sched_map) << endl;
-            cout << "Reader Domain: " << endl << str(reader_domain) << endl;
+              cout << "RAW String: " << raw_string << endl;
+              cout << "WAR String: " << war_string << endl;
+            }
 
+            // Add RAW dep: RD dep on WR -> RAW str
+            dependencies.insert({{outpt__, inpt__}, raw_vec});
+            // Add WAR dep: WR dep on RD -> WAR str
+            dependencies.insert({{inpt__, outpt__}, war_vec});
+          } catch (std::exception& e) {
+            cout << "[ERROR] Caught out_of_range exception during dep extraction: " << e.what() << endl;
             cout << "RAW String: " << raw_string << endl;
             cout << "WAR String: " << war_string << endl;
           }
-
-          // Add RAW dep: RD dep on WR -> RAW str
-          dependencies.insert({{outpt__, inpt__}, raw_vec});
-          // Add WAR dep: WR dep on RD -> WAR str
-          dependencies.insert({{inpt__, outpt__}, war_vec});
 
         }
 
