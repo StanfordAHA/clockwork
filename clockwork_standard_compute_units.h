@@ -931,15 +931,15 @@ uint16_t round_to_even(float a) {
   //uint32_t e = reinterpret_cast<uint32_t&>(a);
   union_var.f = a;
   uint32_t e = union_var.val;
-  
+
   // round float to even, comment out this codeblock for truncation
   uint32_t half = 0x00008000;
   uint32_t sum = e + half;
-  
+
   // check if bottom bits are all zero
   uint32_t mantissa_mask = 0x0000ffff;
   bool is_zeroed = (sum & mantissa_mask) == 0;
-  
+
   // clear last bit (round even) on tie
   uint32_t clear_mask = ~( ((uint32_t)is_zeroed) << 16);
   e = sum & clear_mask;
@@ -1087,4 +1087,61 @@ bfloat16_t log_bf16(bfloat16_t a) {
   float result = logf(e);
   bfloat16_t result_bf16 = bfloat16_t::make_from_bits(round_to_even(result));
   return result_bf16;
+}
+
+// Absolute maximum of two bfloat16 abs values
+static inline
+bfloat16_t abs_max(bfloat16_t a, bfloat16_t b) {
+  float e = bfloat16_to_float(a.to_bits());
+  float f = bfloat16_to_float(b.to_bits());
+  float abs_e = fabsf(e);
+  float abs_f = fabsf(f);
+  float result = (abs_e >= abs_f) ? abs_e : abs_f;
+  bfloat16_t result_bf16 = bfloat16_t::make_from_bits(round_to_even(result));
+  return result_bf16;
+}
+
+// Extract the upper 8 bits of a bfloat16 value and zero-extend to 16 bits
+static inline
+uint16_t bit8_unpack_high(bfloat16_t in0) {
+  // Reinterpret the bfloat16 as its raw 16-bit representation
+  uint16_t raw = *(uint16_t*)&in0;
+  // Shift down to get bits [15:8], mask to 8 bits, upper bits are zero
+  return (raw >> 8) & 0xFF;
+}
+
+// Extract the lower 8 bits of a bfloat16 value and zero-extend to 16 bits
+static inline
+uint16_t bit8_unpack_low(bfloat16_t in0) {
+  // Reinterpret the bfloat16 as its raw 16-bit representation
+  uint16_t raw = *(uint16_t*)&in0;
+  // Mask to keep bits [7:0], upper bits are zero
+  return raw & 0xFF;
+}
+
+static inline
+uint16_t bit8_pack(bfloat16_t in0, bfloat16_t in1) {
+  uint16_t packed = (((uint16_t)(in0 & 0xFF)) << 8) | (in1 & 0xFF);
+  return packed;
+}
+
+static inline
+uint16_t get_shared_exp(bfloat16_t in0) {
+  uint16_t shared_exp;
+  uint8_t exp_field = (in0 >> 7) & 0xFF;
+  if (exp_field == 0) {
+      shared_exp = 127;
+  } else {
+      shared_exp = uint16_t(static_cast<uint8_t>(exp_field) - 6);
+  }
+  return shared_exp;
+}
+
+static inline
+// E8M0 quantization division where in0 is bf16 and in1 is biased e8m0
+uint16_t e8m0_quant(bfloat16_t in0, uint16_t in1) {
+  float in0_float = float(in0);
+  float scale = powf(2.0f, static_cast<float>(in1 - 127));
+  int8_t quantized_value = static_cast<int8_t>(roundf(in0_float / scale));
+  return static_cast<uint16_t>(quantized_value);
 }
