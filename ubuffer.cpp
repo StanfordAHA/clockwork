@@ -4564,8 +4564,11 @@ CoreIR::Instance* UBuffer::map_ubuffer_to_cgra(CodegenOptions& options, CoreIR::
       cout << "NUM OUTPUT PORTS : " << tb.num_out_ports() << endl;
     }
     config_file = generate_ubuf_args(options, hw_impl.sub_component);
-    cout << "Add rv information to buffer..." << endl;
-    config_file = add_rv_info_to_json(config_file, hw_impl.target_buf);
+    const char* dense_ready_valid = std::getenv("DENSE_READY_VALID");
+    if (dense_ready_valid && dense_ready_valid[0] == '1') {
+      cout << "Add rv information to buffer..." << endl;
+      config_file = add_rv_info_to_json(config_file, hw_impl.target_buf);
+    }
     cout << "Generate lake tile instance...af" << endl;
     buf = generate_lake_tile_instance(def, options,
       ub_ins_name, "lake",
