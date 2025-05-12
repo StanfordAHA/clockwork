@@ -21341,39 +21341,42 @@ void compile_for_garnet_single_port_mem(prog& prg,
 
   cout << endl << endl << endl;
 
-  cout << "Printing buffer information..." << endl;
+  const char* dense_ready_valid = std::getenv("DENSE_READY_VALID");
+  if (dense_ready_valid && dense_ready_valid[0] == '1') {
+    cout << "Printing buffer information..." << endl;
 
-  // Calculate dependencies here...
-  for(auto buf_kp : buffers_opt){
-    // cout << "Calculating deps for buffer: " << buf_kp.first << endl;
-    // Use at instead of the iterator otherwise it's a copy
-    buffers_opt.at(buf_kp.first).populate_rv_deps(false);
-    cout << "Buffer: " << buf_kp.first << endl;
-    cout << buf_kp.second << endl;
-  }
-
-  cout << endl << endl << endl;
-
-  for(auto buf_kp : buffers_opt){
-    auto buf = buf_kp.second;
-    if(buf.dependencies_str.size() > 0){
-      cout << "Showing deps for buffer: " << buf_kp.first << endl;
-      // for(auto dep_info : buf.dependencies_str){
-      //   auto port_pair = dep_info.first;
-      //   auto dep_str = dep_info.second;
-      //   cout << port_pair.first << " -> " << port_pair.second << " :\n" << dep_str << endl << endl;
-      // }
-      // cout << endl << endl << endl;
-      for(auto dep_info : buf.dependencies){
-        auto port_pair = dep_info.first;
-        auto dep_vec = dep_info.second;
-        cout << port_pair.first << " -> " << port_pair.second << " : " << dep_vec << endl;
-      }
-      cout << endl;
+    // Calculate dependencies here...
+    for(auto buf_kp : buffers_opt){
+      // cout << "Calculating deps for buffer: " << buf_kp.first << endl;
+      // Use at instead of the iterator otherwise it's a copy
+      buffers_opt.at(buf_kp.first).populate_rv_deps(false);
+      cout << "Buffer: " << buf_kp.first << endl;
+      cout << buf_kp.second << endl;
     }
-  }
 
-  // assert(false);
+    cout << endl << endl << endl;
+
+    for(auto buf_kp : buffers_opt){
+      auto buf = buf_kp.second;
+      if(buf.dependencies_str.size() > 0){
+        cout << "Showing deps for buffer: " << buf_kp.first << endl;
+        // for(auto dep_info : buf.dependencies_str){
+        //   auto port_pair = dep_info.first;
+        //   auto dep_str = dep_info.second;
+        //   cout << port_pair.first << " -> " << port_pair.second << " :\n" << dep_str << endl << endl;
+        // }
+        // cout << endl << endl << endl;
+        for(auto dep_info : buf.dependencies){
+          auto port_pair = dep_info.first;
+          auto dep_vec = dep_info.second;
+          cout << port_pair.first << " -> " << port_pair.second << " : " << dep_vec << endl;
+        }
+        cout << endl;
+      }
+    }
+
+    // assert(false);
+  }
 
   auto sched_max = lexmaxpt(range(hw_sched));
   cout << "Latency of application is: " << str((sched_max)) << endl;
