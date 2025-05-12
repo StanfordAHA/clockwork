@@ -2,7 +2,7 @@
 #include "lake_target.h"
 
 #include <set>
-
+#define COREIR 1
 #ifdef COREIR
 #include "cwlib.h"
 #include "cgralib.h"
@@ -2741,6 +2741,7 @@ CoreIR::Module*  generate_coreir_without_ctrl(CodegenOptions& options,
     }
   }
 
+
   auto def = ub->newModuleDef();
 
   auto sched_maps = get_maps(schedmap);
@@ -2748,8 +2749,19 @@ CoreIR::Module*  generate_coreir_without_ctrl(CodegenOptions& options,
     if(!hwinfo.check_if_compute_created(op)) {
       generate_coreir_compute_unit(options, found_compute, def, op, prg, buffers, hwinfo);
       hwinfo.set_compute_is_created(op);
+      cout << "Compue unit created... for op: " << op->name << endl;
     }
   }
+
+  cout << "LOADED COMPUTE FILE" << endl;
+  cout << "Should be in context..." << endl;
+  auto namespaces = context->getNamespaces();
+  cout << "Printing namespaces..." << endl;
+  for (auto ns : namespaces) {
+    cout << ns.first << endl;
+    cout << ns.second->getName() << endl;
+  }
+  // assert(false);
 
   //Add a pass to see if there is a glb
   for (auto& it: buffers) {
@@ -2776,6 +2788,7 @@ CoreIR::Module*  generate_coreir_without_ctrl(CodegenOptions& options,
     }
   }
 
+  int buf_cnt = 0;
 
   for (auto& buf : buffers) {
     //Help for DEBUG
@@ -2788,16 +2801,692 @@ CoreIR::Module*  generate_coreir_without_ctrl(CodegenOptions& options,
     //if (!contains(buf.first, "input_glb")) {
     //    continue;
     //}
+    // All non-boundary buffers (have inputs and outputs in the application)
     if (!prg.is_boundary(buf.first)) {
       //all the memory optimization pass goes here
+      cout << "MADE IT HERE" << endl;
+      cout << "Print bank name: " << tab(1) << buf.first << endl;
+      cout << "Print bank schedule..." << endl;
+      auto buf_ctx = buf.second.ctx;
+      isl_printer* p = isl_printer_to_file(buf_ctx, stdout);
+      isl_printer_print_union_map(p, buf.second.global_schedule());
+      cout << endl;
+      cout << "Done printing information..." << endl;
       auto impl = generate_optimized_memory_implementation(options, buf.second, prg, hwinfo);
 
       lower_to_garnet_implementation(options, buf.second, impl, hwinfo);
 
+      cout << "Before bank merging and rewrite: " << buf_cnt << endl;
+
+      cout << "PRINTING IMPLEMENTATION (0)" << endl;
+      cout << impl << endl;
+      cout << endl;
+
+      // cout << impl.get_buf_name() << endl;
+      // Print reads and writers...
+
+      cout << "Writers: " << endl;
+      for (auto w : impl.bank_writers) {
+        cout << tab(1) << w.first << endl;
+        cout << tab(2) << w.second << endl;
+      }
+      cout << "Readers: " << endl;
+      for (auto w : impl.bank_readers) {
+        cout << tab(1) << w.first << endl;
+        cout << tab(2) << w.second << endl;
+      }
+
+      cout << "PRINTING IMPLEMENTATION (1)" << endl;
+      cout << impl << endl;
+      cout << endl;
+
       impl.bank_merging_and_rewrite(options);
+
+      cout << "After bank merging and rewrite: " << buf_cnt << endl;
+
+      cout << "Writers: " << endl;
+      for (auto w : impl.bank_writers) {
+        cout << tab(1) << w.first << endl;
+        cout << tab(2) << w.second << endl;
+      }
+      cout << "Readers: " << endl;
+      for (auto w : impl.bank_readers) {
+        cout << tab(1) << w.first << endl;
+        cout << tab(2) << w.second << endl;
+      }
+
+      buf_cnt++;
+
+      cout << "PRINTING IMPLEMENTATION (2)" << endl;
+      cout << impl << endl;
+      cout << endl;
+
+      cout << "PRINTING GARNET LOWERING" << endl;
+      // Get lowering info from impl...
+      auto lowering_information = impl.lowering_info;
+
+      const char* dense_ready_valid = std::getenv("DENSE_READY_VALID");
+      if (dense_ready_valid && dense_ready_valid[0] == '1') {
+        cout << "POPULATING DEPENDENCIES ON LOWERED BUFFER" << endl;
+        for(auto l : lowering_information){
+          impl.lowering_info.at(l.first).target_buf.populate_rv_deps(true);
+        }
+
+        cout << "SHOW LOWERED BUFFS" << endl;
+        for(auto l : lowering_information){
+          auto buf_ = impl.lowering_info.at(l.first).target_buf;
+          if(buf_.dependencies.size() > 0){
+            cout << "(LOWERED) Showing deps for buffer: " << l.first << endl;
+            for(auto dep_info : buf_.dependencies){
+              auto port_pair = dep_info.first;
+              auto dep_vec = dep_info.second;
+              cout << port_pair.first << " -> " << port_pair.second << " : " << dep_vec << endl;
+            }
+            cout << endl;
+          }
+        }
+
+        // TODO: Check here if the lowered information has infomation on the changed buffer
+        cout << "GETTING INFO FOR FILTERING: " << buf.first << endl;
+
+        std::vector<std::string> normal_ports;
+        std::vector<std::string> siphoned_from_input_port_ports;
+        std::vector<std::pair<string, string>> siphoned_from_normal_port_ports;
+
+        // Need to save the domain, access map that is used for the buffer
+        std::map<std::string, isl_set*> use_domains_save;
+        std::map<std::string, umap*> use_access_maps_save;
+
+        // Go through the shift registered outputs and match them
+        for(auto sro : impl.shift_registered_outputs){
+          // These are the ones that are directly siphoned off the input
+          cout << "Shift reg output: " << sro.first << endl;
+          cout << "The actual output and its int..." << sro.second.first << " " << sro.second.second << endl;
+
+          auto port_name = sro.first;
+          auto writer_name = sro.second.first;
+          // Now we have the port name - find it in the original buf and print its information
+          // Get domain and access map
+          // Simplify address space here????
+          buf.second.simplify_address_space();
+          auto buf_access_map = buf.second.access_map.at(port_name);
+          auto buf_domain = buf.second.domain.at(port_name);
+          cout << "Domain: " << str(buf_domain) << endl;
+          cout << "Access Map: " << str(buf_access_map) << endl;
+
+          for(auto l : lowering_information) {
+            cout << "IMPL: " << l.first << " -> " << endl;
+            // Second is a GarnetImpl which ahs a targe_buf
+            auto gimpl = l.second;
+            auto gimpl_targ_buf = gimpl.target_buf;
+            bool exists_in_impl = gimpl_targ_buf.access_map.count(port_name) > 0;
+            // cout << "Exists in impl: " << exists_in_impl << endl;
+
+            if(exists_in_impl){
+              cout << "Port that still exists in the implementation..." << endl;
+              auto new_domain = gimpl_targ_buf.domain.at(port_name);
+              // Get non-simplified...
+              auto new_access_map = gimpl_targ_buf.access_map_non_simplified.at(port_name);
+              auto new_access_map_simplified = gimpl_targ_buf.access_map.at(port_name);
+              cout << "Domain: " << str(new_domain) << endl;
+              cout << "Access Map (NS): " << str(new_access_map) << endl;
+              cout << "Access Map (S) : " << str(new_access_map_simplified) << endl;
+
+              normal_ports.push_back(port_name);
+
+              // Now want to calculate the difference
+              // Copy access map and rename range to original buffer...
+              auto copied_access_map = cpy(new_access_map);
+              auto converted_from_union_map_to_map = to_map(copied_access_map);
+              if(converted_from_union_map_to_map == nullptr){
+                cout << "Converted map is null" << endl;
+                assert(false);
+              }
+              cout << "ADDING NEW NAME: " << buf.second.name << endl;
+              // Let's just convert the name to the range name of the currently implemented bank...
+              // auto new_access_map_range_name = range_name()
+              auto renamed_access_map = set_range_name(converted_from_union_map_to_map, buf.second.name);
+
+              auto convert_back_into_union_map = to_umap(renamed_access_map);
+              if(convert_back_into_union_map == nullptr){
+                cout << "re-Converted map is null" << endl;
+                assert(false);
+              }
+
+              cout << "RECONVERT" << endl;
+              cout << str(convert_back_into_union_map) << endl;
+
+              // (LOWERED) Showing deps for buffer: 2
+              // hw_input_global_wrapper_stencil_op_hcompute_conv_stencil_10 -> hw_input_global_wrapper_stencil_op_hcompute_hw_input_global_wrapper_stencil_2 : {}
+              // hw_input_global_wrapper_stencil_op_hcompute_conv_stencil_7 -> hw_input_global_wrapper_stencil_op_hcompute_hw_input_global_wrapper_stencil_2 : {0, 0}
+              // hw_input_global_wrapper_stencil_op_hcompute_hw_input_global_wrapper_stencil_2 -> hw_input_global_wrapper_stencil_op_hcompute_conv_stencil_10 : {}
+              // hw_input_global_wrapper_stencil_op_hcompute_hw_input_global_wrapper_stencil_2 -> hw_input_global_wrapper_stencil_op_hcompute_conv_stencil_7 : {}
+
+              // Try projecting the range of the original on the range of the new
+              auto inv_original_access_map = inv(buf_access_map);
+              auto old_proj_onto_new = dot(convert_back_into_union_map, inv_original_access_map);
+              cout << "Old projected onto new: " << str(old_proj_onto_new) << endl;
+
+              // Get difference in domain between
+              auto domain_new = to_uset(cpy(new_domain));
+              auto domain_projected = domain(old_proj_onto_new);
+              // Calculate difference
+              auto diff_domains = diff(domain_new, domain_projected);
+
+              cout << "Domain new: " << str(domain_new) << endl;
+              cout << "Domain projected: " << str(domain_projected) << endl;
+              cout << "Difference in domains: " << str(diff_domains) << endl;
+
+              // Copy the original and new domains and domain difference...
+              // gimpl_targ_buf.original_domain[port_name] = cpy(buf_domain);
+              // gimpl_targ_buf.new_domain[port_name] = cpy(new_domain);
+              // gimpl_targ_buf.domain_difference[port_name] = to_set(cpy(diff_domains));
+
+              // Need to do it without copying the object...
+              impl.lowering_info.at(l.first).target_buf.original_domain[port_name] = cpy(buf_domain);
+              impl.lowering_info.at(l.first).target_buf.original_domain_projected[port_name] = to_set(cpy(domain_projected));
+              impl.lowering_info.at(l.first).target_buf.new_domain[port_name] = cpy(new_domain);
+              // Check if empty...
+              auto ss = get_sets(diff_domains);
+              if(ss.size() == 0){
+                cout << "Setting to nullptr... (1)" << endl;
+                // impl.lowering_info.at(l.first).target_buf.domain_difference[port_name] = nullptr;
+              }
+              else{
+                impl.lowering_info.at(l.first).target_buf.domain_difference[port_name] = to_set(cpy(diff_domains));
+              }
+
+              // Save information for later...
+              use_domains_save.insert({port_name, cpy(new_domain)});
+              use_access_maps_save.insert({port_name, cpy(convert_back_into_union_map)});
+
+            }
+            else{
+
+              siphoned_from_input_port_ports.push_back(port_name);
+              cout << "Does not exist in impl: directly siphoned off of input (in shift_registered_outputs)" << endl;
+              cout << "Providing it the original domain and access map..." << endl;
+              auto new_domain = buf.second.domain.at(writer_name);
+              auto new_access_map = buf.second.access_map.at(writer_name);
+              cout << "Domain: " << str(new_domain) << endl;
+              cout << "Access Map: " << str(new_access_map) << endl;
+
+              // Now want to calculate the difference
+              // Try projecting the range of the original on the range of the new
+              auto inv_original_access_map = inv(buf_access_map);
+              auto old_proj_onto_new = dot(new_access_map, inv_original_access_map);
+              cout << "Old projected onto new: " << str(old_proj_onto_new) << endl;
+
+              // Get difference in domain between
+              auto domain_new = to_uset(cpy(new_domain));
+              auto domain_projected = domain(old_proj_onto_new);
+              // Calculate difference
+              auto diff_domains = diff(domain_new, domain_projected);
+
+              cout << "Domain new: " << str(domain_new) << endl;
+              cout << "Domain projected: " << str(domain_projected) << endl;
+              cout << "Difference in domains: " << str(diff_domains) << endl;
+
+              // Copy the original and new domains and domain difference...
+              // gimpl_targ_buf.original_domain[port_name] = cpy(buf_domain);
+              // gimpl_targ_buf.new_domain[port_name] = cpy(new_domain);
+              // gimpl_targ_buf.domain_difference[port_name] = to_set(cpy(diff_domains));
+              impl.lowering_info.at(l.first).target_buf.original_domain[port_name] = cpy(buf_domain);
+              impl.lowering_info.at(l.first).target_buf.original_domain_projected[port_name] = to_set(cpy(domain_projected));
+              impl.lowering_info.at(l.first).target_buf.new_domain[port_name] = cpy(new_domain);
+
+              // Check if empty...
+              auto ss = get_sets(diff_domains);
+              if(ss.size() == 0){
+                cout << "Setting to nullptr... (2)" << endl;
+                // impl.lowering_info.at(l.first).target_buf.domain_difference[port_name] = nullptr;
+              }
+              else{
+                impl.lowering_info.at(l.first).target_buf.domain_difference[port_name] = to_set(cpy(diff_domains));
+              }
+              // impl.lowering_info.at(l.first).target_buf.domain_difference[port_name] = to_set(cpy(diff_domains));
+
+
+              // Save information for later...
+              use_domains_save.insert({port_name, cpy(new_domain)});
+              use_access_maps_save.insert({port_name, cpy(new_access_map)});
+
+              // Also just check if the original port it was siphoned off was in there...others might need it later
+              // In the case of an output port that is a delay 0 of another output port of delay 0 from an input...
+              if(use_domains_save.count(writer_name) == 0){
+                cout << "Writer name not already in save" << endl;
+                use_domains_save.insert({writer_name, cpy(new_domain)});
+                use_access_maps_save.insert({writer_name, cpy(new_access_map)});
+              }
+
+            }
+            cout << "PRINT GIMPL DOMAIN DIFFERENCES" << endl;
+            for(auto dd_it:gimpl_targ_buf.domain_difference){
+              cout << dd_it.first << " -> " << str(dd_it.second) << endl;
+            }
+            cout << endl << endl << endl;
+
+
+          }
+
+          cout << endl << endl << endl;
+
+
+
+        }
+
+        std::string write_name_save = "";
+
+        for(auto sro : impl.shift_registered_outputs_to_outputs){
+          // These are the ones that are directly siphoned off another output port
+          cout << "Shift reg output to output: " << sro.first << endl;
+          cout << "The actual output and its int..." << sro.second.first << " " << sro.second.second << endl;
+
+          auto port_name = sro.first;
+          auto writer_name = sro.second.first;
+
+          // Now we have the port name - find it in the original buf and print its information
+          // Get domain and access map
+          auto buf_access_map = buf.second.access_map.at(port_name);
+          auto buf_domain = buf.second.domain.at(port_name);
+
+          cout << "Domain: " << str(buf_domain) << endl;
+          cout << "Access Map: " << str(buf_access_map) << endl;
+
+          for(auto l : lowering_information) {
+            cout << "IMPL: " << l.first << endl;
+            // Second is a GarnetImpl which has a target_buf
+            auto gimpl = l.second;
+            auto gimpl_targ_buf = gimpl.target_buf;
+            bool exists_in_impl = gimpl_targ_buf.access_map.count(port_name) > 0;
+
+            if(exists_in_impl){
+              cout << "THIS SHOULDN'T HAPPEN" << endl;
+              assert(false);
+            }
+            else{
+
+              // If the port writer is in the shift_registered_outputs, then we should use the writer name, else use the saved name
+              cout << "Writer name original: " << writer_name << endl;
+              auto writer_name_use = writer_name;
+              cout << "Writer name use: " << writer_name_use << endl;
+
+              // Check if it's in there...
+              auto in_sro = impl.shift_registered_outputs.count(writer_name_use) > 0;
+
+              if(in_sro){
+                cout << "In SRO..." << endl;
+                write_name_save = writer_name_use;
+              }
+              else{
+                cout << "Not in SRO..." << endl;
+                // It's possible that it is in this sroo but from an input, so check if it's in the inputs...
+                auto buf_abstract_inputs = buf.second.get_in_ports();
+                auto buf_impl_inputs = gimpl_targ_buf.get_in_ports();
+                // Find the port in here...
+
+                if (std::find(buf_abstract_inputs.begin(), buf_abstract_inputs.end(), writer_name_use) != buf_abstract_inputs.end()) {
+                  cout << "Found in abstract inputs..." << endl;
+                }
+                // auto in_abstract_inputs = buf_abstract_inputs.count(writer_name_use) > 0;
+                auto in_abstract_inputs = (std::find(buf_abstract_inputs.begin(), buf_abstract_inputs.end(), writer_name_use) != buf_abstract_inputs.end());
+                // auto in_impl_inputs = buf_impl_inputs.count(writer_name_use) > 0;
+                auto in_impl_inputs = (std::find(buf_impl_inputs.begin(), buf_impl_inputs.end(), writer_name_use) != buf_impl_inputs.end());
+
+                auto in_saved = use_domains_save.count(writer_name_use) > 0;
+
+                cout << "In abstract inputs: " << in_abstract_inputs << endl;
+                cout << "In impl inputs: " << in_impl_inputs << endl;
+                cout << "In saved inputs: " << in_saved << endl;
+                // If the port isn't in either input, need to use the saved name
+                if(!(in_abstract_inputs || in_impl_inputs || in_saved)){
+                  writer_name_use = write_name_save;
+                }
+
+                cout << "Using this writer name... " << writer_name_use << endl;
+
+              }
+
+              siphoned_from_normal_port_ports.push_back({port_name, writer_name_use});
+
+              // Trace the writer name back to the original buffer output port....
+              cout << "Does not exist in impl: directly siphoned off of another output (in shift_registered_outputs_outputs)" << endl;
+              cout << "Providing it the original domain and access map for port: " << writer_name_use << endl;
+              // We get the domain and access map directly from the saved information in the previous set of loops over shift-registered outputs
+              auto new_domain = use_domains_save.at(writer_name_use);
+              auto new_access_map = use_access_maps_save.at(writer_name_use);
+              cout << "Domain: " << str(new_domain) << endl;
+              cout << "Access Map: " << str(new_access_map) << endl;
+              // Now want to calculate the difference
+
+              // Try projecting the range of the original on the range of the new
+              // auto inv_original_access_map = inv_in_place(buf_access_map);
+              auto inv_original_access_map = inv(buf_access_map);
+              auto inv_new_access_map = inv(new_access_map);
+              auto old_proj_onto_new = dot(new_access_map, inv_original_access_map);
+              cout << "Old projected onto new: " << str(old_proj_onto_new) << endl;
+
+              // Get difference in domain between
+              auto domain_new = to_uset(cpy(new_domain));
+              auto domain_projected = domain(old_proj_onto_new);
+              // Calculate difference
+              auto diff_domains = diff(domain_new, domain_projected);
+              cout << "Domain new: " << str(domain_new) << endl;
+              cout << "Domain projected: " << str(domain_projected) << endl;
+              cout << "Difference in domains: " << str(diff_domains) << endl;
+
+              // Copy the original and new domains and domain difference...
+              // gimpl_targ_buf.original_domain[port_name] = cpy(buf_domain);
+              // gimpl_targ_buf.new_domain[port_name] = cpy(new_domain);
+              // gimpl_targ_buf.domain_difference[port_name] = cpy(diff_domains);
+
+              impl.lowering_info.at(l.first).target_buf.original_domain[port_name] = cpy(buf_domain);
+              impl.lowering_info.at(l.first).target_buf.original_domain_projected[port_name] = to_set(cpy(domain_projected));
+              impl.lowering_info.at(l.first).target_buf.new_domain[port_name] = cpy(new_domain);
+
+              // Check if empty...
+              auto ss = get_sets(diff_domains);
+              if(ss.size() == 0){
+                impl.lowering_info.at(l.first).target_buf.domain_difference[port_name] = nullptr;
+              }
+              else{
+                impl.lowering_info.at(l.first).target_buf.domain_difference[port_name] = to_set(cpy(diff_domains));
+              }
+
+              // Need to save these for downstream...
+              if(use_domains_save.count(port_name) == 0){
+                cout << "Writer name not already in save" << endl;
+                use_domains_save.insert({port_name, cpy(new_domain)});
+                use_access_maps_save.insert({port_name, cpy(new_access_map)});
+              }
+
+            }
+
+          }
+
+
+
+          cout << endl << endl << endl;
+
+        }
+
+        // Special catch for apps I'm working on...
+        if((buf.first == "hw_input_global_wrapper_stencil") || (buf.first == "hw_input_global_wrapper_stencil_bank_2")){
+          cout << "Printing out buffer information..." << endl;
+          cout << "Normal Ports" << endl << normal_ports << endl;
+          cout << "Siphoned from input port ports" << endl << siphoned_from_input_port_ports << endl;
+          cout << "Siphoned from normal port ports" << endl << siphoned_from_normal_port_ports << endl;
+          // assert(false);
+        }
+
+        cout << "Printing bank capacity..." << endl;
+        for (auto it : impl.bank_readers) {
+          auto bank_num = it.first;
+          auto bank_capacity = impl.get_bank_capacity(bank_num);
+          cout << "BANK: " << bank_num << " -> " << bank_capacity << endl;
+        }
+
+        for(auto l : lowering_information) {
+          cout << "BANK: " << l.first << " -> " << endl;
+          // Second is a GarnetImpl which ahs a targe_buf
+          auto gimpl = l.second;
+          auto gimpl_targ_buf = gimpl.target_buf;
+          cout << "TARGET BUF: " << endl << gimpl_targ_buf << endl;
+
+          cout << endl << endl << endl;
+
+          // Have target buffer, want to get the different numbers associated with each buffer
+          auto in_ports = gimpl_targ_buf.get_in_ports();
+          auto out_ports = gimpl_targ_buf.get_out_ports();
+
+          std::map<std::string, std::map<std::string, std::vector<int>>> in_ports_collected;
+          std::map<std::string, std::map<std::string, std::vector<int>>> out_ports_collected;
+
+          for (auto inpt : in_ports) {
+
+            // Get access map first.... tyoe std::map<string, umap*>
+            auto buf_access_map = gimpl_targ_buf.access_map.at(inpt);
+            auto buf_sched_map = gimpl_targ_buf.schedule.at(inpt);
+            // Now we want to get the strides for each dimension
+            auto aff_access_map = get_aff(buf_access_map);
+            auto aff_sched_map = get_aff(buf_sched_map);
+            cout << str(aff_access_map) << endl;
+            cout << str(aff_sched_map) << endl;
+            cout << endl;
+
+            auto buff_domain = gimpl_targ_buf.domain.at(inpt);
+
+            auto num_dims_aff = num_dims(buff_domain);
+            cout << "Num dims: " << num_dims_aff << endl;
+
+            // Insert dimensionality
+
+            auto extents_dom = extents(buff_domain);
+
+            in_ports_collected[inpt]["dimensionality"] = {num_dims_aff - 1};
+            in_ports_collected[inpt]["address_stride"] = {};
+            in_ports_collected[inpt]["address_offset"] = {int_const_coeff(aff_access_map)};
+            in_ports_collected[inpt]["cycle_stride"] = {};
+            in_ports_collected[inpt]["cycle_offset"] = {int_const_coeff(aff_sched_map)};
+            in_ports_collected[inpt]["extents"] = {};
+            in_ports_collected[inpt]["deltas"] = {};
+
+            // Now loop through the dims and print the coefficient at each spot...
+            // Ignore the root dimension
+            for(int i = 0; i < num_dims_aff - 1; i++) {
+              cout << "Dim: " << i << endl;
+              int idx = num_dims_aff - 1 - i;
+              cout << "extent: " << extents_dom.at(idx) << endl;
+              cout << "addr stride: " << int_coeff(aff_access_map, idx) << endl;
+              cout << "sched stride: " << int_coeff(aff_sched_map, idx) << endl;
+
+              in_ports_collected[inpt]["address_stride"].push_back(int_coeff(aff_access_map, idx));
+              in_ports_collected[inpt]["cycle_stride"].push_back(int_coeff(aff_sched_map, idx));
+              in_ports_collected[inpt]["extents"].push_back(extents_dom.at(idx));
+
+            }
+            cout << "addr offset: " << int_const_coeff(aff_access_map) << endl;
+            cout << "sched offset: " << int_const_coeff(aff_sched_map) << endl;
+            cout << endl;
+
+          }
+
+
+          for (auto inpt : out_ports) {
+
+            // Get access map first.... tyoe std::map<string, umap*>
+            auto buf_access_map = gimpl_targ_buf.access_map.at(inpt);
+            auto buf_sched_map = gimpl_targ_buf.schedule.at(inpt);
+            // Now we want to get the strides for each dimension
+            auto aff_access_map = get_aff(buf_access_map);
+            auto aff_sched_map = get_aff(buf_sched_map);
+            cout << str(aff_access_map) << endl;
+            cout << str(aff_sched_map) << endl;
+            cout << endl;
+
+            auto buff_domain = gimpl_targ_buf.domain.at(inpt);
+
+            auto num_dims_aff = num_dims(buff_domain);
+            cout << "Num dims: " << num_dims_aff << endl;
+
+            auto extents_dom = extents(buff_domain);
+
+            out_ports_collected[inpt]["dimensionality"] = {num_dims_aff - 1};
+            out_ports_collected[inpt]["address_stride"] = {};
+            out_ports_collected[inpt]["address_offset"] = {int_const_coeff(aff_access_map)};
+            out_ports_collected[inpt]["cycle_stride"] = {};
+            out_ports_collected[inpt]["cycle_offset"] = {int_const_coeff(aff_sched_map)};
+            out_ports_collected[inpt]["extents"] = {};
+            out_ports_collected[inpt]["deltas"] = {};
+
+            // Now loop through the dims and print the coefficient at each spot...
+            for(int i = 0; i < num_dims_aff - 1; i++) {
+              cout << "Dim: " << i << endl;
+              int idx = num_dims_aff - 1 - i;
+              cout << "extent: " << extents_dom.at(idx) << endl;
+              cout << "addr stride: " << int_coeff(aff_access_map, idx) << endl;
+              cout << "sched stride: " << int_coeff(aff_sched_map, idx) << endl;
+
+              out_ports_collected[inpt]["address_stride"].push_back(int_coeff(aff_access_map, idx));
+              out_ports_collected[inpt]["cycle_stride"].push_back(int_coeff(aff_sched_map, idx));
+              out_ports_collected[inpt]["extents"].push_back(extents_dom.at(idx));
+
+            }
+            cout << "addr offset: " << int_const_coeff(aff_access_map) << endl;
+            cout << "sched offset: " << int_const_coeff(aff_sched_map) << endl;
+            cout << endl;
+
+          }
+
+          for(auto inpt: in_ports) {
+            cout << "In port: " << inpt << endl;
+            // Calculate deltas
+            std::vector<int> extents_sub_1;
+            std::vector<int> deltas;
+
+            auto ubuf_map = in_ports_collected.at(inpt);
+
+            auto dims_ = ubuf_map["dimensionality"].at(0);
+            int offset = 0;
+            for(auto it2: ubuf_map["extents"]) {
+              extents_sub_1.push_back(it2 - 1);
+            }
+            deltas.push_back(ubuf_map["address_stride"].at(0));
+            for(int i = 0; i < dims_ - 1; i++) {
+              offset -= (extents_sub_1.at(i) * ubuf_map["address_stride"].at(i));
+              deltas.push_back(ubuf_map["address_stride"].at(i + 1) + offset);
+            }
+            cout << deltas << endl;
+            cout << in_ports_collected.at(inpt)["deltas"] << endl;
+
+            for(auto d: deltas){
+              in_ports_collected.at(inpt)["deltas"].push_back(d);
+            }
+            cout << in_ports_collected.at(inpt)["deltas"] << endl;
+          }
+
+          for(auto it: in_ports_collected) {
+            cout << "In port: " << it.first << endl;
+            for(auto it2: it.second) {
+              cout << tab(1) << it2.first << " -> ";
+              for(auto it3: it2.second) {
+                cout << it3 << " ";
+              }
+              cout << endl;
+            }
+          }
+
+          for(auto inpt: out_ports) {
+            cout << "Out port: " << inpt << endl;
+            // Calculate deltas
+            std::vector<int> extents_sub_1;
+            std::vector<int> deltas;
+
+            auto ubuf_map = out_ports_collected.at(inpt);
+
+            auto dims_ = ubuf_map["dimensionality"].at(0);
+            int offset = 0;
+            for(auto it2: ubuf_map["extents"]) {
+              extents_sub_1.push_back(it2 - 1);
+            }
+            deltas.push_back(ubuf_map["address_stride"].at(0));
+            for(int i = 0; i < dims_ - 1; i++) {
+              offset -= (extents_sub_1.at(i) * ubuf_map["address_stride"].at(i));
+              deltas.push_back(ubuf_map["address_stride"].at(i + 1) + offset);
+            }
+            cout << deltas << endl;
+            cout << out_ports_collected.at(inpt)["deltas"] << endl;
+
+            for(auto d: deltas){
+              out_ports_collected.at(inpt)["deltas"].push_back(d);
+            }
+            cout << out_ports_collected.at(inpt)["deltas"] << endl;
+          }
+
+          for(auto it: out_ports_collected) {
+            cout << "Out port: " << it.first << endl;
+            for(auto it2: it.second) {
+              cout << tab(1) << it2.first << " -> ";
+              for(auto it3: it2.second) {
+                cout << it3 << " ";
+              }
+              cout << endl;
+            }
+          }
+
+          // Calculate Deltas
+
+          // Now we need to implement the dependency algorithm
+          // Store
+          std::map<std::pair<std::string, std::string>, std::map<std::string, std::vector<int>>> rv_deps;
+
+          for(auto in_port: in_ports_collected){
+            for(auto out_port: out_ports_collected){
+
+              auto in_dims = in_port.second["dimensionality"].at(0);
+              auto out_dims = out_port.second["dimensionality"].at(0);
+
+              auto in_address_strides = in_port.second["address_stride"];
+              auto out_address_strides = out_port.second["address_stride"];
+
+              auto in_address_offset = in_port.second["address_offset"].at(0);
+              auto out_address_offset = out_port.second["address_offset"].at(0);
+
+              auto in_extents = in_port.second["extents"];
+              auto out_extents = out_port.second["extents"];
+
+              // Calculate RAW
+              int in_ctr_dim = 0;
+              int out_ctr_dim = 0;
+
+              // Check if the in_port has any deltas less than or equal to 0 to indicate repeated writes
+              bool repeated_write = false;
+              for(auto d: in_port.second["deltas"]){
+                if(d <= 0){
+                  repeated_write = true;
+                }
+              }
+
+
+              // At the end, add it to the map
+              rv_deps[std::make_pair(in_port.first, out_port.first)] = {};
+            }
+          }
+
+        }
+
+        cout << endl << endl << endl;
+
+        cout << "AFTER GARNET LOWERING" << endl;
+
+        cout << "TRY PRINTING IMPL DOMAIN DIFF... " << buf.first << endl;
+        for(auto l : impl.lowering_info) {
+          auto gimpl = l.second;
+          auto gimpl_targ_buf = gimpl.target_buf;
+          cout << "GIMPL: " << l.first << endl;
+          cout << "TARGET BUF: " << endl << gimpl_targ_buf << endl;
+          for(auto dd_it:gimpl_targ_buf.domain_difference){
+            // Check if dd_it.second is nullptr
+            if(dd_it.second == nullptr){
+              cout << dd_it.first << " -> nullptr" << endl;
+              cout << "NO DIFFERENCE!" << endl;
+            }
+            else{
+              cout << dd_it.first << " -> " << str(dd_it.second) << endl;
+            }
+          }
+        }
+      }
+
+      // assert(false);
 
       //Generate the memory module
       auto ub_mod = generate_coreir_without_ctrl(options, context, buf.second, impl, hwinfo);
+      cout << "Printing UB MOD" << endl;
+      cout << ub_mod->toString() << endl;
+      // cout << ub_mod->name << endl;
+      // cout << *ub_mod << endl;
+      // assert(false);
       def->addInstance(buf.second.name, ub_mod);
       //TODO: add reset connection for garnet mapping
       //cout << "connected reset for " << buf.first << buf.second.name <<  endl;
@@ -2816,6 +3505,24 @@ CoreIR::Module*  generate_coreir_without_ctrl(CodegenOptions& options,
       //}
     }
   }
+
+  // Should have final buffers here...let's check out their schedules...
+  cout << "Printing finals buffers???? (1)" << endl;
+  for (auto & buf : buffers) {
+    cout << "Buffer: " << buf.first << endl;
+    auto bctx = buf.second.ctx;
+    isl_printer* p = isl_printer_to_file(bctx, stdout);
+    auto buf_glb_sched_umap = buf.second.global_schedule();
+    // cout << "Schedule: " << buf.second.global_schedule() << endl;
+    isl_printer_print_union_map(p, buf_glb_sched_umap);
+    cout << endl;
+    cout << endl;
+    cout << buf << endl << endl;
+  }
+
+  cout << "AFTER BUFFER OPT" << endl;
+  prg.pretty_print();
+  cout << "AFTER PRETTY PRINT" << endl;
 
   auto levels = get_variable_levels(prg);
   // Connect compute units to buffers
@@ -2951,12 +3658,44 @@ CoreIR::Module*  generate_coreir_without_ctrl(CodegenOptions& options,
     }
   }
 
+  // Should have final buffers here...let's check out their schedules...
+  cout << "Printing finals buffers???? (2)" << endl;
+  for (auto & buf : buffers) {
+    cout << "Buffer: " << buf.first << endl;
+    auto bctx = buf.second.ctx;
+    isl_printer* p = isl_printer_to_file(bctx, stdout);
+    auto buf_glb_sched_umap = buf.second.global_schedule();
+    // cout << "Schedule: " << buf.second.global_schedule() << endl;
+    isl_printer_print_union_map(p, buf_glb_sched_umap);
+    cout << endl;
+    cout << endl;
+    cout << endl;
+    cout << buf << endl << endl;
+  }
+
   generate_controller_for_compute_share(options, def, sched_maps, hwinfo, prg);
   generate_mux_for_compute_share(def, buffers, hwinfo, prg);
 
+  // Should have final buffers here...let's check out their schedules...
+  cout << "Printing finals buffers???? (3)" << endl;
+  for (auto & buf : buffers) {
+    cout << "Buffer: " << buf.first << endl;
+    auto bctx = buf.second.ctx;
+    isl_printer* p = isl_printer_to_file(bctx, stdout);
+    auto buf_glb_sched_umap = buf.second.global_schedule();
+    // cout << "Schedule: " << buf.second.global_schedule() << endl;
+    isl_printer_print_union_map(p, buf_glb_sched_umap);
+    cout << endl;
+    cout << endl;
+    cout << endl;
+    cout << buf << endl << endl;
+  }
+
   ub->setDef(def);
 
+  cout << "Printing ub->print()" << endl;
   ub->print();
+  cout << "after that..." << endl;
 
   //connect_signal("reset", ub);
   //context->runPasses({"wireclocks-coreir"});
@@ -5415,12 +6154,17 @@ void generate_coreir_without_ctrl(CodegenOptions& options,
 
   prg_mod = generate_coreir_without_ctrl(options, buffers, prg, schedmap, context, hwinfo, dse_compute_filename);
 
+  cout << "AFTER generate_coreir_without_ctrl..." << endl;
+  cout << "Saving to json..." << endl;
+
 
   auto ns = context->getNamespace("global");
   if(!saveToFile(ns, options.dir + prg.name + ".json", prg_mod)) {
     cout << "Could not save ubuffer coreir" << endl;
     context->die();
   }
+
+  cout << "BEFORE PASSES" << endl;
 
   map_memory(options, prg_mod, buffers, true);
 
@@ -5446,10 +6190,280 @@ void generate_coreir_without_ctrl(CodegenOptions& options,
 
 
   auto global = context->getNamespace("global");
+
+  // Try to get the program...
+  Module* prg_mod_new = global->getModule(prg.name);
+  auto def = prg_mod_new->getDef();
+  cout << "PRINT PROGRAM" << endl;
+  cout << prg_mod_new->toString() << endl;
+  auto prg_instances = def->getInstances();
+  auto prg_connections = def->getConnections();
+  for (auto inst : prg_instances) {
+    cout << "Instance: " << inst.first << endl;
+    cout << inst.second->toString() << endl;
+  }
+  cout << endl << endl << endl;
+  cout << "Printing connections..." << endl;
+  for (auto conn : prg_connections) {
+    cout << conn.first->toString() << " -> " << conn.second->toString() << endl;
+  }
+
+  std::set<std::string> buffers_to_process;
+  for (auto buf : buffers) {
+    cout << "Buffer: " << buf.first << endl;
+    auto buf_use = buf.second;
+    // Check which buffers need more data...
+
+    for(auto output_port : buf_use.get_out_ports()){
+      cout << "This output port..." << output_port << endl;
+      // Check if the port is in the precursor_extra
+      if(buf_use.precursor_extra.find(output_port) == buf_use.precursor_extra.end()){
+        cout << "Port: " << output_port << " not in precursor_extra" << endl;
+        continue;
+      }
+
+      auto local_data_left = buf_use.get_remaining_data(output_port, 0);
+      cout << "Port: " << output_port << " has data left: " << local_data_left << endl;
+      // if(local_data_left > 0){
+      buffers_to_process.insert(buf.first);
+      // }
+    }
+  }
+
+  cout << "Buffers to process..." << endl;
+  for(auto buf : buffers_to_process){
+    auto buf_name_exclude = buf;
+    // Need to find all connections with this instance and instances outside of the instance
+    cout << buf << endl;
+    // Now go find each port of the buffer, correllate it with its final point in the graph, then find
+    // the path of no other intervening ports and add data on it
+    auto buf_object = buffers.at(buf);
+
+    // Put the shift reg data in the fabric...
+    cout << "EXTRA DATA LOCATIONS (2)" << endl;
+    for(auto it : buf_object.extra_data_locations){
+      cout << "Reg name: " << it.first << " has extra data: " << it.second << endl;
+      auto reg_name = it.first;
+      auto reg_inst_name = buf_name_exclude + "$" + reg_name + "$reg0";
+      cout << "Find program instance at this name: " << reg_inst_name << endl;
+      auto reg_inst = prg_instances.at(reg_inst_name);
+      Json reg_inst_md;
+      if(reg_inst->hasMetaData()){
+        reg_inst_md = reg_inst->getMetaData();
+      }
+      reg_inst_md["extra_data"] = it.second;
+      reg_inst->setMetaData(reg_inst_md);
+    }
+
+    // Assumption is we should traverse but avoid any instances in the same namespace
+    for(auto output_port : buf_object.get_out_ports()){
+      auto entry_point = buf_object.collect_port_mappings[output_port]["reg_name"];
+      cout << "Output Port: " << output_port << endl;
+      cout << "Entry point: " << entry_point << endl;
+      auto buf_instance_name = buf_name_exclude + "$" + entry_point;
+      auto curr_instance = buf_instance_name;
+      // We found an input data port
+      if(entry_point.find("data_in") != std::string::npos){
+        cout << "This is a data_in...need to swap to the wire that drives this then follow that" << endl;
+        // Assume that there is only one wire driving this input...
+        for(auto connection : def->getConnections()){
+          auto use_first = true;
+          if(connection.first->toString() == curr_instance){
+            use_first = true;
+          }
+          else if(connection.second->toString() == curr_instance){
+            use_first = false;
+          }
+          else{
+            // This port isn't in this connection...
+            continue;
+          }
+          auto other_instance_ = use_first ? connection.second->toString() : connection.first->toString();
+          cout << "Replacing " << curr_instance << " with " << other_instance_ << endl;
+          curr_instance = other_instance_;
+          break;
+        }
+      }
+
+      // Need to know how much downstream data the port still needs
+      cout << "Getting remaining data..." << endl;
+      auto remaining_data = buf_object.get_remaining_data(output_port, 0);
+      cout << "This much data left (before starting...): " << remaining_data << endl;
+      auto any_non_pe = false;
+      int loop_tries = 1000;
+      while(remaining_data > 0){
+        loop_tries -= 1;
+        if(loop_tries == 0){
+          cout << "Loop tries exceeded..." << endl;
+          assert(false);
+        }
+        vector<string> all_downstream_connections = {};
+        for(auto connection : def->getConnections()){
+          // If check if in first or second, if so, make sure other is out-of-instance PE
+          auto use_first = true;
+          if(connection.first->toString() == curr_instance){
+            use_first = true;
+          }
+          else if(connection.second->toString() == curr_instance){
+            use_first = false;
+          }
+          else{
+            continue;
+          }
+
+          cout << "At this connection" << endl;
+          cout << connection.first->toString() << " -> " << connection.second->toString() << endl;
+          auto other_instance = use_first ? connection.second->toString() : connection.first->toString();
+
+          auto curr_instance_name = curr_instance.substr(0, curr_instance.find("$"));
+          auto other_instance_name = other_instance.substr(0, other_instance.find("$"));
+          cout << "Buf instance name: " << buf_name_exclude << endl;
+          cout << "Curr instance name: " << curr_instance_name << endl;
+          cout << "other instance name: " << other_instance_name << endl;
+          // If to the same one, just ignore it...
+          // if(other_instance.find(buf_name_exclude) != std::string::npos){
+          if(buf_name_exclude == other_instance_name){
+            // any_non_pe = true;
+            // Don't know what to do if this happens yet...
+            // TODO: Handle this case
+            // assert(false);
+            cout << "Skipping this connection since they are from the same instance..." << endl;
+            continue;
+          }
+
+          // If the other guy has "data_in" in the name, it's another buffer's input port, ignore it
+          if(other_instance.find("data_in") != std::string::npos){
+            // any_non_pe = true;
+            // Don't know what to do if this happens yet...
+            cout << "Skipping this connection since the other is an input to a memory... " << endl;
+            continue;
+          }
+
+          // Check if "inner_compute" in connection name, if it is not, just die
+          // Also check if the other instance is an input reg (in camera_pipeline_2x2 it is)
+          if((other_instance.find("inner_compute") == std::string::npos) && (other_instance.find("reg0.in") == std::string::npos)){
+            any_non_pe = true;
+            // continue
+            // Don't know what to do if this happens yet...
+            // TODO: Handle this case
+            // assert(false);
+            continue;
+            // Don't add the connections that loop back...
+          }
+
+          // Can add it now...
+          cout << "Adding this downstream instance..." << other_instance << endl;
+          all_downstream_connections.push_back(other_instance);
+          cout << "Now there are this many downstream conns: " << all_downstream_connections.size() << endl;
+          // curr_instance = other_instance;
+
+        }
+
+        // Make sure the size of downstream connections is still 1...
+        if(all_downstream_connections.size() != 1){
+          // Don't know what to do if this happens yet...
+          cout << "NOT THAN 1 CONNECTION" << endl;
+          cout << "Remaining data: " << remaining_data << endl;
+          cout << "This many connections... " << all_downstream_connections.size() << endl;
+          // assert(false);
+        }
+
+        // Shouldn't need to check if there's another incoming branch
+        // because it should be guaranteed that there is uninterrupted room for buffering
+
+        for(auto downstream_connection : all_downstream_connections){
+          // If we are here, we know that the other instance is a PE, put as much data as we can into it
+          // TODO: Handle broadcast
+          // Put data at the input fifo first...
+          auto num_input_fifo_max = 2;
+          auto num_output_fifo_max = 2;
+          auto num_input_fifo = 0;
+          auto num_output_fifo = 0;
+
+          cout << "Downstream connection... " << downstream_connection << endl;
+
+          // Should I be able to just add these to json? cut off .data*
+          string instance_name;
+          // Check if .data is in the name
+          if(downstream_connection.find(".data") != std::string::npos){
+            instance_name = downstream_connection.substr(0, downstream_connection.find(".data"));
+          }
+          else if(downstream_connection.find(".O0") != std::string::npos){
+            instance_name = downstream_connection.substr(0, downstream_connection.find(".O0"));
+          }
+          else if(downstream_connection.find(".in") != std::string::npos){
+            instance_name = downstream_connection.substr(0, downstream_connection.find(".in"));
+          }
+          else{
+            cout << "Couldn't find the name to make it..." << endl;
+            instance_name = downstream_connection;
+          }
+
+          auto downstream_inst = prg_instances.at(instance_name);
+
+          // prg_instances.at(instance_name)["config"] = {};
+
+          if(remaining_data <= num_input_fifo_max){
+            num_input_fifo = remaining_data;
+            // Add this config to the PE
+            buf_object.add_data_committed(output_port, 0, remaining_data);
+            remaining_data = 0;
+          }
+          else{
+            num_input_fifo = num_input_fifo_max;
+            buf_object.add_data_committed(output_port, 0, num_input_fifo_max);
+            remaining_data -= num_input_fifo_max;
+          }
+
+          auto inst_modargs = downstream_inst->getModArgs();
+          auto inst_metadata = downstream_inst->getMetaData();
+          cout << "MODARGS" << endl;
+          for(auto it__ : inst_modargs) {
+            cout << it__.first << " -> " << it__.second << endl;
+          }
+          cout << "METADATA" << endl;
+          // for(auto it__ : inst_metadata) {
+          cout << inst_metadata << endl;
+          // }
+          // prg_instances.at(instance_name)["config"]["num_input_fifo"] = num_input_fifo;
+          // downstream_inst->getModArgs()["num_input_fifo"] = CoreIR::IntType(num_input_fifo);
+          inst_metadata["num_input_fifo"] = num_input_fifo;
+
+          if(remaining_data <= num_output_fifo_max){
+            num_output_fifo = remaining_data;
+            buf_object.add_data_committed(output_port, 0, remaining_data);
+            remaining_data = 0;
+
+          }
+          else{
+            num_output_fifo = num_output_fifo_max;
+            buf_object.add_data_committed(output_port, 0, num_output_fifo_max);
+            remaining_data -= num_output_fifo_max;
+          }
+
+          // downstream_inst->getModArgs()["num_output_fifo"] = CoreIR::IntType(num_output_fifo);
+          inst_metadata["num_output_fifo"] = num_output_fifo;
+          downstream_inst->setMetaData(inst_metadata);
+
+          // prg_instances.at(instance_name)["config"]["num_output_fifo"] = num_output_fifo;
+          cout << "Placed data at this PE: " << downstream_connection << " with " << num_input_fifo << " input fifo and " << num_output_fifo << " output fifo" << endl;
+          cout << "Remaining data: " << remaining_data << endl;
+
+          // Now at the end of this, can move along in the chain...
+          curr_instance = downstream_connection;
+          // TODO: Fix
+          break;
+
+        }
+      }
+    }
+  }
+
   if(!saveToFile(global,  options.dir + prg.name+ "_to_metamapper.json", prg_mod)) {
     cout << "Could not save ubuffer coreir" << endl;
     context->die();
   }
+  cout << "AFTER PASSES" << endl;
 
   deleteContext(context);
 }

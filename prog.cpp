@@ -5121,6 +5121,8 @@ umap* prog::validity_deps() {
   map<op*, isl_set*> domains = this->domains();
   map<op*, isl_map*> schedules = this->schedules();
   vector<umap*> validity_dep_maps;
+  // std::cout << str(schedules) << std::endl;
+  // exit(1);
   for (auto b : all_buffers(*this)) {
     cout << "Computing validity deps for " << b << endl;
 
@@ -5136,18 +5138,87 @@ umap* prog::validity_deps() {
     }
     uset* domain = unn(user_domains);
     umap* naive_sched = unn(user_schedules);
+    cout << "User domain = " << str(domain) << endl;
+    cout << "Naive schedule = " << str(naive_sched) << endl;
 
     auto writes =
       its(producer_map(b), domain);
     auto reads =
       its(consumer_map(b), domain);
 
+    cout << "Producer Map = " << str(producer_map(b)) << endl;
+    cout << "Consumer Map = " << str(consumer_map(b)) << endl;
+
+    cout << "Writes = " << str(writes) << endl;
+    cout << "Reads = " << str(reads) << endl;
+
+    cout << "Inverse Reads = " << str(inv(reads)) << endl;
+
     auto writers_to_readers = dot(writes, inv(reads));
+    cout << "Writers to readers = " << str(writers_to_readers) << endl;
 
     umap* user_sched = its(naive_sched, domain);
+    cout << "User schedule = " << str(user_sched) << endl;
     auto before = lex_lt(user_sched, user_sched);
+    cout << "Before = " << str(before) << endl;
     auto validity =
       its(writers_to_readers, before);
+    cout << "Validity = " << str(validity) << endl;
+
+    validity_dep_maps.push_back(validity);
+  }
+
+  auto valid = unn(validity_dep_maps);
+  assert(valid != nullptr);
+  return valid;
+}
+
+umap* prog::validity_deps_WAR() {
+
+  cout << "COMPUTING WAR DEPS" << endl;
+  //umap* naive_sched = unoptimized_schedule();
+  //auto domain = whole_iteration_domain();
+
+  map<op*, isl_set*> domains = this->domains();
+  map<op*, isl_map*> schedules = this->schedules();
+  vector<umap*> validity_dep_maps;
+  // std::cout << str(schedules) << std::endl;
+  // exit(1);
+  for (auto b : all_buffers(*this)) {
+    cout << "Computing validity deps for " << b << endl;
+
+    vector<uset*> user_domains;
+    vector<umap*> user_schedules;
+    for (auto op : find_readers(b, *this)) {
+      user_domains.push_back(to_uset(map_find(op, domains)));
+      user_schedules.push_back(to_umap(map_find(op, schedules)));
+    }
+    for (auto op : find_writers(b, *this)) {
+      user_domains.push_back(to_uset(map_find(op, domains)));
+      user_schedules.push_back(to_umap(map_find(op, schedules)));
+    }
+    uset* domain = unn(user_domains);
+    umap* naive_sched = unn(user_schedules);
+    cout << "User domain = " << str(domain) << endl;
+    cout << "Naive schedule = " << str(naive_sched) << endl;
+
+    auto writes =
+      its(producer_map(b), domain);
+    auto reads =
+      its(consumer_map(b), domain);
+
+    auto readers_to_writers = dot(reads, inv(writes));
+    cout << "Readers to writers = " << str(readers_to_writers) << endl;
+    // auto writers_to_readers = dot(writes, inv(reads));
+    // cout << "Writers to readers = " << str(writers_to_readers) << endl;
+
+    umap* user_sched = its(naive_sched, domain);
+    cout << "User schedule = " << str(user_sched) << endl;
+    auto before = lex_lt(user_sched, user_sched);
+    cout << "Before = " << str(before) << endl;
+    auto validity =
+      its(readers_to_writers, before);
+    cout << "Validity = " << str(validity) << endl;
 
     validity_dep_maps.push_back(validity);
   }

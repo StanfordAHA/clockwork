@@ -1154,7 +1154,7 @@ map<string, UBuffer> build_buffers(prog& prg, umap* opt_sched) {
 
       assert(contains_key(op, domains));
 
-      cout << "\tAdding output port: " << pt_name << endl;
+      cout << "\tAdding input port: " << pt_name << endl;
       cout << "\t\tConsumed: " << str(consumed_here) << endl;
       buf.add_in_pt(pt_name, domains.at(op), consumed_here, its(opt_sched, domains.at(op)));
 
@@ -1163,7 +1163,7 @@ map<string, UBuffer> build_buffers(prog& prg, umap* opt_sched) {
       }
 
       vector<string> inpt = buf.get_in_ports();
-      cout << "current out port name: " << endl;
+      cout << "current in port name: " << endl;
       for_each(inpt.begin(), inpt.end(), [](string pt_name){cout <<"\t" << pt_name;});
       cout << endl;
 
@@ -1256,6 +1256,11 @@ map<string, UBuffer> build_buffers(prog& prg, umap* opt_sched) {
       for_each(inpt.begin(), inpt.end(), [](string pt_name){cout <<"\t" << pt_name;});
       cout << endl;
 
+      vector<string> inpt2 = buf.get_in_ports();
+      cout << "current out port name2: " << endl;
+      for_each(inpt2.begin(), inpt2.end(), [](string pt_name){cout <<"\t" << pt_name;});
+      cout << endl;
+
       usuffix++;
     }
   }
@@ -1266,14 +1271,35 @@ map<string, UBuffer> build_buffers(prog& prg, umap* opt_sched) {
 map<string, UBuffer> build_buffers(prog& prg, umap* opt_sched, schedule_info & hwinfo) {
   int usuffix = 0;
 
+  cout << "Build Buffers...begin" << endl;
+  prg.pretty_print();
+  cout << endl;
+  isl_ctx* isl_ctx_here = isl_union_map_get_ctx(opt_sched);
+  isl_printer* p = isl_printer_to_file(isl_ctx_here, stdout);
+  isl_printer_print_union_map(p, opt_sched);
+  cout << endl;
+  cout << "Printing some schedule info..." << endl;
+  cout << hwinfo.dse_compute_filename << endl;
+
   map<string, UBuffer> buffers;
   auto domains = prg.domains();
   auto all_op = prg.all_ops();
+
+  cout << endl;
 
   //sort all ops by its name instead of ptr addres
   //to avoid uncertainty in buffer name
   vector<op*> all_op_vec(all_op.begin(), all_op.end());
   std::sort(all_op_vec.begin(), all_op_vec.end(), [](op* l, op* r){return l->name > r->name;});
+
+  auto vd = prg.validity_deps();
+  auto vd_war = prg.validity_deps_WAR();
+  cout << "Printing validity deps..." << endl;
+  cout << str(vd) << endl;
+  cout << "Printing validity deps WAR..." << endl;
+  cout << str(vd_war) << endl;
+
+  cout << "BUILD BUFFERS ALL OP VEC" << endl;
 
   for (auto op : all_op_vec) {
 
@@ -1296,6 +1322,12 @@ map<string, UBuffer> build_buffers(prog& prg, umap* opt_sched, schedule_info & h
       string pt_name = name + "_" + op->name + "_" + to_string(usuffix);
       buf.port_bundles[op->name + "_write"].push_back(pt_name);
 
+      cout << "(1) Creating name out of " << name << " and " << op->name << " and " << usuffix << endl;
+      cout << "Printing validity deps..." << endl;
+      string vd_str = str(vd);
+      std::replace(vd_str.begin(), vd_str.end(), ';', '\n');
+      cout << vd_str << endl;
+
       string cond = "{ ";
       for (auto sec_pair : consumed.second) {
         if (sec_pair.first == "") {
@@ -1305,6 +1337,8 @@ map<string, UBuffer> build_buffers(prog& prg, umap* opt_sched, schedule_info & h
           cond = cond + string(prg.op_iter(op) + " -> " + consumed.first + "[" + sec_pair.second + "] : " + sec_pair.first + "; ");
         }
       }
+
+      // cout << "Cond: " << cond << endl;
       cond = cond.substr(0, cond.length() - 2);
       cond = cond + string(" }");
 
@@ -1332,7 +1366,7 @@ map<string, UBuffer> build_buffers(prog& prg, umap* opt_sched, schedule_info & h
       usuffix++;
     }
 
-    map<string, int> mem_port_cnt; 
+    map<string, int> mem_port_cnt;
     for (auto consumed : op->consume_locs_pair) {
       string name = consumed.first;
 
@@ -1356,6 +1390,18 @@ map<string, UBuffer> build_buffers(prog& prg, umap* opt_sched, schedule_info & h
 
       UBuffer& buf = buffers.at(name);
 
+      cout << "(2) Creating name out of " << name << " and " << op->name << " and " << usuffix << endl;
+
+      auto buffer_name = name;
+      auto op_name = op->name;
+
+      // Have the buffer and the op. Need to take the specific part of the op (consumed location)
+      // and find the validity deps for that statement
+      cout << "buffer name: " << buffer_name << endl;
+      cout << "op name: " << op_name << endl;
+      cout << "Consumed first: " << consumed.first << endl;
+      cout << "Consumed second: " << consumed.second << endl;
+
       string pt_name = name + "_" + op->name + "_" + to_string(usuffix);
       buf.port_bundles[op->name + "_read"].push_back(pt_name);
 
@@ -1368,6 +1414,7 @@ map<string, UBuffer> build_buffers(prog& prg, umap* opt_sched, schedule_info & h
           cond = cond + string(prg.op_iter(op) + " -> " + consumed.first + "[" + sec_pair.second + "] : " + sec_pair.first + "; ");
         }
       }
+      // cout << "Cond2: " << cond << endl;
       cond = cond.substr(0, cond.length() - 2);
       cond = cond + string(" }");
 
@@ -1418,8 +1465,15 @@ map<string, UBuffer> build_buffers(prog& prg, umap* opt_sched, schedule_info & h
       isl_map* origin_sched = to_map(its(opt_sched, domains.at(op)));
 
       int slack = hwinfo.get_compute_inpt_slack(op, name, mem_port_cnt.at(name));
+      cout << "Op: " << op->name << endl;
+      cout << "Buffer: " << name << endl;
+      cout << "Slack: " << slack << endl;
+      cout << "Memport cnt: " << mem_port_cnt.at(name) << endl;
+      cout << "Port name: " << pt_name << endl;
       cout << "origin sched: " << str(origin_sched) << endl;;
-      isl_map* outpt_sched = linear_schedule(origin_sched, {1}, slack, false);  
+      isl_map* outpt_sched = linear_schedule(origin_sched, {1}, slack, false);
+      cout << "outpt_sched: " << str(outpt_sched) << endl;
+
 
       buf.add_out_pt(pt_name, domains.at(op), consumed_here, to_umap(outpt_sched));
 
@@ -1435,6 +1489,8 @@ map<string, UBuffer> build_buffers(prog& prg, umap* opt_sched, schedule_info & h
       usuffix++;
     }
   }
+
+  cout << "Build Buffers...end" << endl;
 
   return buffers;
 }

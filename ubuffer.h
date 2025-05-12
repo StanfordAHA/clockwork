@@ -7,6 +7,9 @@
 
 #include "qexpr.h"
 #include "prog.h"
+#include "coreir/ir/json.h"
+typedef nlohmann::json Json;
+
 
 using namespace std;
 
@@ -1069,6 +1072,11 @@ class UBuffer {
     std::map<string, bool> isIn;
     std::map<string, isl_set*> domain;
 
+    // Dependencies are a map from a pair of ports to a
+    // vector of counter-to-counter constraints
+    std::map<std::pair<string, string>, vector<int>> dependencies;
+    std::map<std::pair<string, string>, string> dependencies_str;
+
     int coarse_grained_pipeline_loop_level;
 
     //This is used to retrive the flattened iteration domain
@@ -1081,6 +1089,13 @@ class UBuffer {
     bool contain_memory_tile = false;
 
     std::map<string, umap*> access_map;
+    std::map<string, umap*> access_map_non_simplified;
+
+    std::map<string, isl_set*> original_domain;
+    std::map<string, isl_set*> original_domain_projected;
+    std::map<string, isl_set*> new_domain;
+    std::map<string, isl_set*> domain_difference;
+
     std::map<string, isl_union_map*> schedule;
     std::map<string, vector<string> > port_bundles;
 
@@ -1093,8 +1108,16 @@ class UBuffer {
     vector<int> read_cycle, write_cycle;
     vector<vector<int> > read_addr, write_addr;
     HWconstraints hardware;
+    // This is for the final lowering to coreir json...
+    map<string, map<string, string>> collect_port_mappings;
+    // This map is to hold how much extra data needs to be added in each direction for each port
+    map<string, vector<pair<int, int>>> precursor_extra;
+    map<string, vector<pair<int, int>>> precursor_committed;
+    map<string, int> extra_data_locations;
+
 
 #ifdef COREIR
+    map<string, CoreIR::Instance *> instance_map;
     json config_file;
 #endif
 
@@ -1111,6 +1134,208 @@ class UBuffer {
         config_file = config;
     }
 #endif
+
+    bool increment_for_loop(vector<int>* iterators, vector<int>* extents){
+      // increment the iterators of the for loop structure to the next point
+      // based on extents
+      bool ret_ = false;
+      //cout << "iterators: " << iterators << endl;
+      //cout << "extents: " << extents << endl;
+      for(int i = 0; i < iterators->size(); i++){
+        // Increment it
+        iterators->at(i) += 1;
+        // If it hit the end, set it back to 0
+        if(iterators->at(i) == extents->at(i)){
+          iterators->at(i) = 0;
+          // If this is the top iterator hitting the end, the increment is done
+          if(i == iterators->size() - 1){
+            ret_ = true;
+          }
+        }
+        // If not the end, the chain is broken and we can stop
+        else{
+          break;
+        }
+      }
+      return ret_;
+    }
+
+    Json add_rv_info_to_json(Json config_file, UBuffer& target_buf);
+    // json add_rv_info_to_json(json config_file, UBuffer& target_buf);
+
+    vector<std::string> tokenize_string(std::string str, std::string delimiter) {
+        std::vector<std::string> tokens;
+        size_t pos = 0;
+        std::string token;
+        while ((pos = str.find(delimiter)) != std::string::npos) {
+            token = str.substr(0, pos);
+            tokens.push_back(token);
+            str.erase(0, pos + delimiter.length());
+        }
+        tokens.push_back(str);
+        return tokens;
+    }
+
+    vector<int> extract_dep_vec_from_dep_str(std::string dep_str){
+
+      vector<string> filtered;
+      vector<int> scalar_offsets_raw;
+
+      if(dep_str == "{  }"){
+        cout << "Empty dep string..." << endl;
+        return scalar_offsets_raw;
+      }
+
+      // Next get the tuple of strings on each side - just get the right side - so
+      // Split the string on ->
+      auto split_string = tokenize_string(dep_str, "->");
+      auto right_string = split_string.at(1);
+      auto access_string = tokenize_string(right_string, "[");
+      auto access_substring = access_string.at(1);
+      auto access_substring2 = tokenize_string(access_substring, "]");
+      auto access_substring3 = access_substring2.at(0);
+      auto access_substring4 = tokenize_string(access_substring3, ",");
+
+      // cout << split_string << endl;
+      // cout << right_string << endl;
+      // cout << access_string << endl;
+      // cout << access_substring << endl;
+      // cout << access_substring2 << endl;
+      // cout << access_substring3 << endl;
+
+      // Now split on comma
+      // Now we have the three elements
+      for(auto it: access_substring4){
+        cout << it << endl;
+        if(it.find("root") == std::string::npos){
+          filtered.push_back(tokenize_string(it, "= ").at(1));
+        }
+      }
+
+      // Now collect the final things...
+      // Filter out root
+      cout << "Printing filtered..." << endl;
+      for(auto it: filtered){
+        cout << it << endl;
+      }
+
+      // Assume for now there is only scalar offsets...
+      for(auto it: filtered){
+        // Check for a plus - if it finds it, extract it
+        if(it.find("+") != std::string::npos){
+          // Split on +
+          auto plus_split = tokenize_string(it, "+");
+          // Now get the first element
+          auto first = plus_split.at(0);
+          scalar_offsets_raw.push_back(stoi(first));
+        }
+        else{
+          // This is the case where the iterator is == (may need to handle this somehow since non-zero cycle write.)
+          scalar_offsets_raw.push_back(0);
+        }
+      }
+
+      return scalar_offsets_raw;
+
+    }
+
+    void populate_rv_deps(bool lowered){
+      cout << "POPULATE_RV_DEPS" << endl;
+      // Here, can we calculate the dependency live?
+      for(auto outpt__: get_out_ports()){
+
+        cout << "Current output port is: " << outpt__ << endl;
+
+        for(auto inpt__: get_in_ports()){
+          cout << "Comparing against input port: " << inpt__ << endl;
+          // Get the maps for each
+          auto writer_access_map = access_map.at(inpt__);
+          if(lowered){
+            writer_access_map = access_map_non_simplified.at(inpt__);
+          }
+          auto writer_sched_map = schedule.at(inpt__);
+          auto writer_domain = domain.at(inpt__);
+
+          auto reader_access_map = access_map.at(outpt__);
+          if(lowered){
+            reader_access_map = access_map_non_simplified.at(outpt__);
+          }
+          auto reader_sched_map = schedule.at(outpt__);
+          auto reader_domain = domain.at(outpt__);
+
+          cout << "Writer Access Map: " << endl << str(writer_access_map) << endl;
+          cout << "Writer Schedule Map: " << endl << str(writer_sched_map) << endl;
+          cout << "Writer Domain: " << endl << str(writer_domain) << endl;
+
+          cout << "Reader Access Map: " << endl << str(reader_access_map) << endl;
+          cout << "Reader Schedule Map: " << endl << str(reader_sched_map) << endl;
+          cout << "Reader Domain: " << endl << str(reader_domain) << endl;
+
+          // This is the exact string that is in the consumer map - so let's use this in calculating the deps
+          auto inv_reads = inv(reader_access_map);
+          auto inv_writes = inv(writer_access_map);
+          auto writers_to_this_read = dot(writer_access_map, inv_reads);
+          auto readers_to_this_write = dot(reader_access_map, inv_writes);
+
+          vector<uset*> user_domains;
+          vector<umap*> user_schedules;
+          user_domains.push_back(to_uset(writer_domain));
+          user_domains.push_back(to_uset(reader_domain));
+          user_schedules.push_back(writer_sched_map);
+          user_schedules.push_back(reader_sched_map);
+
+          uset* union_domain = unn(user_domains);
+          umap* naive_sched = unn(user_schedules);
+          umap* user_sched = its(naive_sched, union_domain);
+          auto before = lex_lt(user_sched, user_sched);
+          auto raw_validity = its(writers_to_this_read, before);
+          auto war_validity = its(readers_to_this_write, before);
+
+          cout << "POPRVDEPS: Validity (RAW) = " << endl << str(raw_validity) << endl;
+          cout << "POPRVDEPS: Validity (WAR) = " << endl << str(war_validity) << endl;
+
+          // Add RAW dep: RD dep on WR -> RAW str
+          dependencies_str.insert({{outpt__, inpt__}, str(raw_validity)});
+          // Add WAR dep: WR dep on RD -> WAR str
+          dependencies_str.insert({{inpt__, outpt__}, str(war_validity)});
+
+          // Do some string analysis to calculate the scalar deps
+          auto raw_string = str(raw_validity);
+          auto war_string = str(war_validity);
+          try {
+            auto raw_vec = extract_dep_vec_from_dep_str(raw_string);
+            auto war_vec = extract_dep_vec_from_dep_str(war_string);
+
+            if(raw_vec.size() == 0){
+              cout << "RAW vec is empty" << endl;
+
+              cout << "Writer Access Map: " << endl << str(writer_access_map) << endl;
+              cout << "Writer Schedule Map: " << endl << str(writer_sched_map) << endl;
+              cout << "Writer Domain: " << endl << str(writer_domain) << endl;
+
+              cout << "Reader Access Map: " << endl << str(reader_access_map) << endl;
+              cout << "Reader Schedule Map: " << endl << str(reader_sched_map) << endl;
+              cout << "Reader Domain: " << endl << str(reader_domain) << endl;
+
+              cout << "RAW String: " << raw_string << endl;
+              cout << "WAR String: " << war_string << endl;
+            }
+
+            // Add RAW dep: RD dep on WR -> RAW str
+            dependencies.insert({{outpt__, inpt__}, raw_vec});
+            // Add WAR dep: WR dep on RD -> WAR str
+            dependencies.insert({{inpt__, outpt__}, war_vec});
+          } catch (std::exception& e) {
+            cout << "[ERROR] Caught out_of_range exception during dep extraction: " << e.what() << endl;
+            cout << "RAW String: " << raw_string << endl;
+            cout << "WAR String: " << war_string << endl;
+          }
+
+        }
+
+      }
+
+    }
 
     int logical_dimension();
 
@@ -3110,6 +3335,50 @@ void tighten_address_space() {
     //smt stream generation
     void generate_smt_stream(CodegenOptions& options);
     void collect_memory_cnt(CodegenOptions& options, mem_access_cnt& mem_access);
+
+    int get_remaining_data(string output_port, int pos){
+      auto data_extra_vec = precursor_extra.at(output_port);
+      int data_extra_int = 0;
+      for(auto it__ : data_extra_vec){
+        if(it__.first == pos){
+          data_extra_int = it__.second;
+        }
+      }
+      auto data_committed_vec = precursor_committed.at(output_port);
+      int data_committed_int = 0;
+      for(auto it__ : data_committed_vec){
+        if(it__.first == pos){
+          data_committed_int = it__.second;
+        }
+      }
+      auto local_data_left = data_extra_int - data_committed_int;
+      return local_data_left;
+    }
+
+    int get_data_committed(string output_port, int pos){
+      auto data_committed_vec = precursor_committed.at(output_port);
+      for(auto it__ : data_committed_vec){
+        if(it__.first == pos){
+          return it__.second;
+        }
+      }
+      return -1;
+    }
+
+    int add_data_committed(string output_port, int pos, int num_data){
+      auto data_committed_vec = precursor_committed.at(output_port);
+      for(int i = 0; i < data_committed_vec.size(); i++){
+        auto item__ = data_committed_vec[i];
+        if(item__.first == pos){
+          precursor_committed.at(output_port)[i].second += num_data;
+          return precursor_committed.at(output_port)[i].second;
+        }
+      }
+      return -1;
+    }
+
+
+
 #ifdef COREIR
     pair<isl_map*, isl_map*> get_bank_pt_IR(string inpt, isl_set* rddom, schedule_info & info);
     UBuffer generate_ubuffer(CodegenOptions& optiosn, UBufferImpl& impl, schedule_info & info, int bank);

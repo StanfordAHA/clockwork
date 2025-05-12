@@ -1,4 +1,5 @@
 #include "coreir_backend.h"
+#define COREIR 1
 #ifdef COREIR
 #include "cwlib.h"
 #include "cgralib.h"
@@ -12,6 +13,9 @@
 #include "prog.h"
 #include "resource.h"
 #include "ubuffer.h"
+
+#include <isl/printer.h>
+#include <isl/printer_type.h>
 
 #include <chrono>
 
@@ -13370,14 +13374,33 @@ void generate_garnet_coreir(std::map<string, UBuffer> buffers_opt, prog prg, Cod
   hwinfo.use_metamapper = use_metamapper;
 
   //TODO: add lake memory tile configuration here
+  cout << "generate_garnet_coreir: 1" << endl;
+  prg.pretty_print();
+  cout << "generate_garnet_coreir: 1 - print program after" << endl;
+
+  cout << "generate_garnet_coreir: 1 - print buffers before" << endl;
+  for ( auto const& [key, val]: buffers_opt) {
+    cout << key << "->" << val << endl;
+  }
+  cout << "generate_garnet_coreir: 1 - print buffers after" << endl;
 
   umap* sched = global_schedule_from_buffers(buffers_opt);
+  isl_ctx* isl_ctx_here = isl_union_map_get_ctx(sched);
+  isl_printer* p = isl_printer_to_file(isl_ctx_here, stdout);
+  cout << "generate_garnet_coreir: 1 - print global sched" << endl;
+  isl_printer_print_union_map(p, sched);
+  cout << endl;
+  cout << "generate_garnet_coreir: 2" << endl;
   if (use_metamapper) {
+    cout << "generate_garnet_coreir: 2.1" << endl;
     generate_coreir_without_ctrl(opt, buffers_opt, prg, sched, hwinfo, dse_compute_filename);
+    cout << "generate_garnet_coreir: 3" << endl;
   } else {
     generate_coreir(opt, buffers_opt, prg, sched, hwinfo);
+    cout << "generate_garnet_coreir: 4" << endl;
   }
   //cmd("mv " + prg.name + ".v " + opt.dir + "verilog");
+    cout << "generate_garnet_coreir: 5" << endl;
 }
 #endif
 
@@ -19799,8 +19822,17 @@ void postprocessing_for_init_ops(CodegenOptions& options, schedule_info & sched,
 
 void garnet_single_port_ram_schedule(CodegenOptions& options, schedule_info& sched, op* root, prog& prg) {
   //get the loop alignment information
+  cout << "Single port ram schedule... (1)" << endl;
   map<string, vector<int> > pad_indices = align_loop_var_with_pad(root, prg);
-
+  cout << "Single port ram schedule... (1.1) print pad indices" << endl;
+  for ( auto const& [key, val]: pad_indices) {
+    // isl_printer* p2 = isl_printer_to_file(isl_map_get_ctx(val), stdout);
+    // cout << str(key) << " -> " << str() << endl;
+    cout << key << "->" << val << endl;
+    // cout << p2 << endl;
+    // isl_printer_print_map(p, val);
+  }
+  cout << "Single port ram schedule... (2)" << endl;
   //FIXME: remove this hack for fft
   if (contains(prg.name, "fft")) {
     //An hack on the fft schedule
@@ -19808,15 +19840,21 @@ void garnet_single_port_ram_schedule(CodegenOptions& options, schedule_info& sch
     return;
   //} else if (is_rate_matchable(prg) || contains(prg.name, "nlmeans")) {
   } else if (is_rate_matchable_loopnest(prg, pad_indices)) {
+    cout << "Single port ram schedule... (3)" << endl;
     prg.pretty_print();
+    cout << "Single port ram schedule... (4) - loop split" << endl;
     loop_split(prg);
+    cout << "Single port ram schedule... (4) - loop split after" << endl;
+    prg.pretty_print();
 
+    cout << "Single port ram schedule... (5) - align loop var with pad" << endl;
     //Try to align the loop and pad it
     map<string, vector<int> > pad_indices = align_loop_var_with_pad(root, prg);
+    cout << "Single port ram schedule... (6) - pad to same depth" << endl;
     pad_to_same_depth(root, prg, pad_indices);
 
+    cout << "Single port ram schedule... (7) - sanity check and pretty pring prg" << endl;
     prg.sanity_check();
-
     prg.pretty_print();
     cout << prg.name << " is a stencil pipeline" << endl;
 
@@ -19876,6 +19914,7 @@ void garnet_single_port_ram_schedule(CodegenOptions& options, schedule_info& sch
     cout << "After codegen: \n" <<codegen_c(global_schedule);
     sanity_check_hw_schedule(sched, prg);
     return;
+
   } else if (contains(prg.name, "split") ) {
     sequential_schedule(sched, root, prg);
     auto op_sched = op_start_times_map(sched, prg);
@@ -21245,18 +21284,111 @@ void compile_for_garnet_single_port_mem(prog& prg,
     prg.pretty_print();
   }
 
+  cout << "Printing program name..." << tab(1) << prg.name << endl;
+
+  cout << "Pretty print the program..." << endl;
+  prg.pretty_print();
+
+  cout << "Validity deps..." << endl;
+  auto vd = prg.validity_deps();
+  // isl_ctx* isl_ctx_here = isl_union_map_get_ctx(vd);
+  // isl_printer* p = isl_printer_to_file(isl_ctx_here, stdout);
+  // isl_printer_print_union_map(p, vd);
+  cout << str(vd) << endl;
+  // cout << vd << endl;
+
+  cout << "Gather information about application..." << endl;
   schedule_info sched = garnet_schedule_info(options, prg, use_metamapper);
   garnet_single_port_ram_schedule(options, sched, prg.root, prg);
+
+  cout << "Pretty print the program...again" << endl;
+  prg.pretty_print();
+
   auto sched_map = op_times_map(sched, prg);
+  auto sched_map_higher_d = prg.schedules();
+  cout << "Raw print sched map..." << endl;
+  cout << str(sched_map) << endl;
+  // isl_printer* p = isl_printer_to_file(isl_map_get_space(sched_map), stdout);
+
+  cout << "Printing conv 3 information..." << endl;
+  cout << endl;
+
+  cout << "Printing high-Dimensional schedule information..." << endl;
+  for ( auto const& [key, val]: sched_map_higher_d) {
+    // isl_printer* p2 = isl_printer_to_file(isl_map_get_ctx(val), stdout);
+    // cout << str(key) << " -> " << str() << endl;
+    cout << key->name << endl;
+    // cout << p2 << endl;
+    // isl_printer_print_map(p, val);
+    cout << str(val) << endl;
+    cout << endl;
+  }
+
+  cout << "New validity deps..." << endl;
+  auto vd_new = prg.validity_deps();
+  // isl_ctx* isl_ctx_here = isl_union_map_get_ctx(vd);
+  // isl_printer* p = isl_printer_to_file(isl_ctx_here, stdout);
+  // isl_printer_print_union_map(p, vd_new);
+  cout << str(vd_new) << endl;
+  cout << endl;
+
+  // cout << str(sched_map_higher_d) << endl;
+  // assert(false);
   auto hw_sched = its(sched_map,
           prg.whole_iteration_domain());
   cout << "result schedule: " << str(hw_sched) << endl;
   auto buffers_opt = build_buffers(prg, hw_sched, sched);
+
+  cout << endl << endl << endl;
+
+  const char* dense_ready_valid = std::getenv("DENSE_READY_VALID");
+  if (dense_ready_valid && dense_ready_valid[0] == '1') {
+    cout << "Printing buffer information..." << endl;
+
+    // Calculate dependencies here...
+    for(auto buf_kp : buffers_opt){
+      // cout << "Calculating deps for buffer: " << buf_kp.first << endl;
+      // Use at instead of the iterator otherwise it's a copy
+      buffers_opt.at(buf_kp.first).populate_rv_deps(false);
+      cout << "Buffer: " << buf_kp.first << endl;
+      cout << buf_kp.second << endl;
+    }
+
+    cout << endl << endl << endl;
+
+    for(auto buf_kp : buffers_opt){
+      auto buf = buf_kp.second;
+      if(buf.dependencies_str.size() > 0){
+        cout << "Showing deps for buffer: " << buf_kp.first << endl;
+        // for(auto dep_info : buf.dependencies_str){
+        //   auto port_pair = dep_info.first;
+        //   auto dep_str = dep_info.second;
+        //   cout << port_pair.first << " -> " << port_pair.second << " :\n" << dep_str << endl << endl;
+        // }
+        // cout << endl << endl << endl;
+        for(auto dep_info : buf.dependencies){
+          auto port_pair = dep_info.first;
+          auto dep_vec = dep_info.second;
+          cout << port_pair.first << " -> " << port_pair.second << " : " << dep_vec << endl;
+        }
+        cout << endl;
+      }
+    }
+
+    // assert(false);
+  }
+
   auto sched_max = lexmaxpt(range(hw_sched));
   cout << "Latency of application is: " << str((sched_max)) << endl;
 
+  cout << "Pretty print the program...again...again" << endl;
+  prg.pretty_print();
   tag_coarse_grained_loop_to_ubuf(buffers_opt, prg);
+  cout << "Pretty print the program...again...again...again" << endl;
+  prg.pretty_print();
+  // assert(false);
   //FIXME: put into separate pass for power analysis
+
   if (energy_model) {
     mem_access_cnt mem_access;
     Mem_access_count(options, buffers_opt, mem_access, prg);
@@ -21266,10 +21398,10 @@ void compile_for_garnet_single_port_mem(prog& prg,
     power_analysis_info power_stats;
     Init_PE_energy_cost(power_params);
 
-#ifdef COREIR
-    PE_energy_cost_instance_model(power_params, power_stats, prg);
-    PE_energy_cost(power_params, power_stats, prg);
-#endif
+    #ifdef COREIR
+        PE_energy_cost_instance_model(power_params, power_stats, prg);
+        PE_energy_cost(power_params, power_stats, prg);
+    #endif
 
   }
 
@@ -29435,6 +29567,64 @@ void unoptimized_mem_baseline() {
     assert(false);
 }
 
+void mek_playground() {
+
+    //vector<prog> isscc_programs = {gaussian(), unsharp_new(), harris(), camera_pipeline_new()};
+    // vector<prog> isscc_programs;
+    // isscc_programs.push_back(conv_3_3_mek());
+    // isscc_programs.push_back(unsharp_isscc());
+    // isscc_programs.push_back(harris_color());
+    // isscc_programs.push_back(camera_pipeline_2x2());
+
+    prog conv_3_3_prg;
+    conv_3_3_prg = conv_3_3_mek();
+    // conv_3_3_prg.pretty_print();
+
+    // compile_for_garnet_single_port_mem(conv_3_3_prg, "/aha/OUTPUTS_CLK/", false, false, false, false, "", false);
+    compile_for_garnet_single_port_mem(conv_3_3_prg, "/aha/clockwork/aha_garnet_design_new/", false, false, false, false, "", false);
+
+    assert(false);
+    return;
+
+    // for (auto prg : isscc_programs) {
+    //   normalize_bounds(prg);
+    //   dsa_writers(prg);
+    //   auto options = garnet_baseline_codegen_options(prg);
+    //   schedule_info sched = garnet_schedule_info(options, prg);
+    //   options.add_memory_hierarchy("mem");
+    //   //compile_cycle_accurate_hw(options, sched, prg);
+    //   //sequential_schedule(sched, prg.root, prg);
+    //   garnet_single_port_ram_schedule(options, sched, prg.root, prg);
+
+    //   auto hw_sched = its(op_times_map(sched, prg), prg.whole_iteration_domain());
+    //   auto sched_max = lexmaxpt(range(hw_sched));
+    //   cout << "Latency of application is: " << str((sched_max)) << endl;
+
+    //   auto buffers = build_buffers(prg, hw_sched);
+
+
+    //   int total_capacity = 0;
+    //   int total_tile = 0;
+    //   for (auto b : buffers) {
+    //     if (!prg.is_boundary(b.first)) {
+    //       int buf_size = card(extents_by_dimension(b.second));
+    //       total_capacity += buf_size;
+    //       int mem_tile_num_by_capacity = (buf_size + 2047) / 2048;
+    //       options.default_banking_strategy = {"exhausive"};
+    //       b.second.generate_banks(options);
+    //       int mem_tile_num_by_bank = b.second.get_banks().size();
+    //       cout << tab(4) << "naive capacity tile number: " << mem_tile_num_by_capacity << endl;
+    //       cout << tab(4) << "naive banking number: " << mem_tile_num_by_bank << endl;
+    //       //total_tile += max(mem_tile_num_by_capacity, mem_tile_num_by_bank);
+    //       total_tile += mem_tile_num_by_bank;
+    //     }
+    //   }
+    //   cout << tab(1) << "=== SRAM bytes for " << prg.name << ": " << total_capacity << endl;
+    //   cout << tab(1) << "=== Memory tile for " << prg.name << ": " << total_tile << endl;
+    // }
+    // assert(false);
+}
+
 
 void stencil_chain_multi_kernel_test() {
   auto prgs = stencil_chain("sc_stat");
@@ -29738,6 +29928,11 @@ int main(int argc, char** argv) {
 
     if (cmd == "jliu-playground") {
       playground();
+      return 0;
+    }
+
+    if (cmd == "mek-playground") {
+      mek_playground();
       return 0;
     }
 
