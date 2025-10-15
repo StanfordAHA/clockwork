@@ -4565,7 +4565,11 @@ CoreIR::Instance* UBuffer::map_ubuffer_to_cgra(CodegenOptions& options, CoreIR::
     }
     config_file = generate_ubuf_args(options, hw_impl.sub_component);
     const char* dense_ready_valid = std::getenv("DENSE_READY_VALID");
-    if (dense_ready_valid && dense_ready_valid[0] == '1') {
+    bool skip_rv_clockwork = (std::getenv("SKIP_RV_CLOCKWORK") != nullptr) && (std::getenv("SKIP_RV_CLOCKWORK")[0] == '1');
+    if (skip_rv_clockwork) {
+      cout << "SKIP RV CLOCKWORK" << endl;
+    }
+    if (dense_ready_valid && dense_ready_valid[0] == '1' && !skip_rv_clockwork) {
       cout << "Add rv information to buffer..." << endl;
       config_file = add_rv_info_to_json(config_file, hw_impl.target_buf);
     }

@@ -2866,7 +2866,11 @@ CoreIR::Module*  generate_coreir_without_ctrl(CodegenOptions& options,
       auto lowering_information = impl.lowering_info;
 
       const char* dense_ready_valid = std::getenv("DENSE_READY_VALID");
-      if (dense_ready_valid && dense_ready_valid[0] == '1') {
+      bool skip_rv_clockwork = (std::getenv("SKIP_RV_CLOCKWORK") != nullptr) && (std::getenv("SKIP_RV_CLOCKWORK")[0] == '1');
+      if (skip_rv_clockwork) {
+        cout << "SKIP RV CLOCKWORK" << endl;
+      }
+      if (dense_ready_valid && dense_ready_valid[0] == '1' && !skip_rv_clockwork) {
         cout << "POPULATING DEPENDENCIES ON LOWERED BUFFER" << endl;
         for(auto l : lowering_information){
           impl.lowering_info.at(l.first).target_buf.populate_rv_deps(true);
