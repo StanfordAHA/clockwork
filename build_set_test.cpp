@@ -21342,7 +21342,11 @@ void compile_for_garnet_single_port_mem(prog& prg,
   cout << endl << endl << endl;
 
   const char* dense_ready_valid = std::getenv("DENSE_READY_VALID");
-  if (dense_ready_valid && dense_ready_valid[0] == '1') {
+  bool skip_rv_clockwork = (std::getenv("SKIP_RV_CLOCKWORK") != nullptr) && (std::getenv("SKIP_RV_CLOCKWORK")[0] == '1');
+  if (skip_rv_clockwork) {
+    cout << "SKIP RV CLOCKWORK" << endl;
+  }
+  if (dense_ready_valid && dense_ready_valid[0] == '1' && !skip_rv_clockwork) {
     cout << "Printing buffer information..." << endl;
 
     // Calculate dependencies here...
