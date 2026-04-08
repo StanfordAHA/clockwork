@@ -1,6 +1,9 @@
 #include "options.h"
 #include "isl_utils.h"
 #include "algorithm.h"
+#include "coreir/ir/json.h"
+#include <fstream>
+#include <cstdlib>
 
 using namespace dbhc;
 
@@ -12,8 +15,21 @@ banking_strategy CodegenOptions::get_banking_strategy(const std::string& buffer)
 }
 
 void CodegenOptions::add_memory_hierarchy(const std::string& level) {
-    LakeCollateral mem(level);
-    mem_hierarchy.insert({level, mem});
+    // Check for external collateral JSON via environment variable:
+    //   LAKE_COLLATERAL_JSON_<LEVEL> (e.g., LAKE_COLLATERAL_JSON_MEM)
+    // Falls back to hardcoded presets if not set.
+    std::string env_key = "LAKE_COLLATERAL_JSON_" + level;
+    // Uppercase the level portion for the env var
+    for (auto& c : env_key) c = toupper(c);
+    const char* json_path = std::getenv(env_key.c_str());
+    if (json_path && std::string(json_path).size() > 0) {
+        cout << "\tLoading " << level << " collateral from: " << json_path << endl;
+        LakeCollateral mem = load_lake_collateral_from_json(json_path);
+        mem_hierarchy.insert({level, mem});
+    } else {
+        LakeCollateral mem(level);
+        mem_hierarchy.insert({level, mem});
+    }
 }
 
 string CodegenOptions::get_hierarchy_level(int capacity) {
@@ -114,4 +130,86 @@ LakeCollateral create_dual_port_memory(int capacity) {
     mem.infer_word_width();
 
     return mem;
+}
+
+void CodegenOptions::load_memory_hierarchy_from_file(const std::string& level, const std::string& filepath) {
+    LakeCollateral lc = load_lake_collateral_from_json(filepath);
+    mem_hierarchy[level] = lc;
+}
+
+LakeCollateral load_lake_collateral_from_json(const std::string& filepath) {
+    std::ifstream fin(filepath);
+    assert(fin.is_open() && ("Failed to open lake collateral JSON: " + filepath).c_str());
+    nlohmann::json j;
+    fin >> j;
+    fin.close();
+
+    LakeCollateral lc;
+
+    // Scalar fields
+    lc.fetch_width = j.value("fetch_width", 1);
+    lc.max_chaining = j.value("max_chaining", 4);
+    lc.iteration_level = j.value("iteration_level", 6);
+    lc.counter_ub = j.value("counter_ub", 65535);
+    lc.load_latency = j.value("load_latency", 0);
+    lc.store_latency = j.value("store_latency", 0);
+    lc.multi_sram_accessor = j.value("multi_sram_accessor", true);
+    lc.dual_port_sram = j.value("dual_port_sram", false);
+    lc.wire_chain_en = j.value("wire_chain_en", false);
+    lc.interconnect_in_num = j.value("interconnect_in_num", 1);
+    lc.interconnect_out_num = j.value("interconnect_out_num", 1);
+
+    // Map<string, int> fields
+    auto load_str_int_map = [](const nlohmann::json& j, const std::string& key) {
+        std::unordered_map<string, int> m;
+        if (j.contains(key) && j[key].is_object()) {
+            for (auto& [k, v] : j[key].items()) {
+                m[k] = v.get<int>();
+            }
+        }
+        return m;
+    };
+
+    lc.word_width = load_str_int_map(j, "word_width");
+    lc.bank_num = load_str_int_map(j, "bank_num");
+    lc.capacity = load_str_int_map(j, "capacity");
+    lc.in_port_width = load_str_int_map(j, "in_port_width");
+    lc.out_port_width = load_str_int_map(j, "out_port_width");
+
+    // Map<string, string> fields
+    auto load_str_str_map = [](const nlohmann::json& j, const std::string& key) {
+        std::unordered_map<string, string> m;
+        if (j.contains(key) && j[key].is_object()) {
+            for (auto& [k, v] : j[key].items()) {
+                m[k] = v.get<string>();
+            }
+        }
+        return m;
+    };
+
+    lc.read_port = load_str_str_map(j, "read_port");
+    lc.write_port = load_str_str_map(j, "write_port");
+
+    // Map<string, bool> field
+    if (j.contains("single_port") && j["single_port"].is_object()) {
+        for (auto& [k, v] : j["single_port"].items()) {
+            lc.single_port[k] = v.get<bool>();
+        }
+    }
+
+    // controller_name (set<string>) — stored as JSON array
+    if (j.contains("controller_name") && j["controller_name"].is_array()) {
+        for (auto& v : j["controller_name"]) {
+            lc.controller_name.insert(v.get<string>());
+        }
+    }
+
+    // iter_level_map (map<string, int>) — ordered map
+    if (j.contains("iter_level_map") && j["iter_level_map"].is_object()) {
+        for (auto& [k, v] : j["iter_level_map"].items()) {
+            lc.iter_level_map[k] = v.get<int>();
+        }
+    }
+
+    return lc;
 }

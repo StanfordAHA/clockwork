@@ -1505,6 +1505,22 @@ void UBufferImpl::bank_merging_and_rewrite(CodegenOptions & options) {
         continue;
     }
 
+    // Skip merging for banks targeting single-port memories that already have
+    // both readers and writers (single-port cannot do simultaneous R+W)
+    if (!options.mem_hierarchy.at("mem").single_port.empty()) {
+        bool any_single_port = false;
+        for (auto& sp : options.mem_hierarchy.at("mem").single_port) {
+            if (sp.second) { any_single_port = true; break; }
+        }
+        if (any_single_port &&
+            !bank_readers.at(bank_id).empty() &&
+            !bank_writers.at(bank_id).empty()) {
+            cout << "\tSkipping merge for bank " << bank_id
+                 << ": single-port memory with both readers and writers" << endl;
+            continue;
+        }
+    }
+
     // Checks some bounds and checks that the domains are the same, which allows these banks to be merged!
     if ((bank_readers.at(bank_id).size() < max_outpt) &&
             (bank_writers.at(bank_id).size() < max_inpt)) {
@@ -1516,6 +1532,11 @@ void UBufferImpl::bank_merging_and_rewrite(CodegenOptions & options) {
     }
   }
   bool is_dual_port = options.mem_hierarchy.at("mem").dual_port_sram;
+
+  // Check single_port constraints: if the target memory component is single-ported,
+  // banks that have both readers and writers cannot be merged (they'd need simultaneous R+W)
+  auto& single_port_map = options.mem_hierarchy.at("mem").single_port;
+
   for (auto it: merge_map) {
     cout << "bank id: " << it.first << ", to be merged: " << it.second << endl;
     if (it.second.size() > 1) {
@@ -2342,6 +2363,11 @@ void add_lake_config(Json& jdata, ConfigMap data, int dimensionality, string dom
 ConfigMap generate_addressor_config_from_access_map(umap* acc_map, LakeCollateral mem, bool is_read, bool tb_share = false) {
      string buf_name = range_name(to_map(acc_map));
      string micro_buf_name = get_micro_buf_name(buf_name);
+     // Validate that the target controller exists in the collateral
+     if (!mem.controller_name.empty() && mem.controller_name.count(micro_buf_name) == 0) {
+         cout << "\tWARNING: controller '" << micro_buf_name
+              << "' not found in LakeCollateral controller_name set" << endl;
+     }
      cout << "\tMicro buf name: " << micro_buf_name << endl;
      int word_width = mem.word_width.at(micro_buf_name);
      int capacity = mem.capacity.at(micro_buf_name);

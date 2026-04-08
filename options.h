@@ -8,6 +8,7 @@
 #include <map>
 #include <unordered_map>
 #include <set>
+#include <fstream>
 
 using namespace std;
 
@@ -180,7 +181,8 @@ struct LakeCollateral {
     std::set<string> controller_name; //use for identify the controller name in configuration
     int fetch_width;
     int max_chaining;
-    //This is the max
+    //This is the max — DEPRECATED: prefer iter_level_map for per-controller levels.
+    //Used as fallback in get_ctrl_iter_level() when a controller is not in iter_level_map.
     int iteration_level;
     //Iteration level should associate to each hardware controller component
     map<string, int> iter_level_map;
@@ -601,6 +603,7 @@ struct CodegenOptions {
   {}
 
   void add_memory_hierarchy(const std::string& level);
+  void load_memory_hierarchy_from_file(const std::string& level, const std::string& filepath);
 
   banking_strategy get_banking_strategy(const std::string& buffer);
   string get_hierarchy_level(int capacity);
@@ -628,3 +631,4 @@ struct mem_access_cnt {
 
 LakeCollateral create_single_port_wide_fetch_memory(int fetch_width, int capacity, int SIPO_num);
 LakeCollateral create_dual_port_memory(int capacity);
+LakeCollateral load_lake_collateral_from_json(const std::string& filepath);
