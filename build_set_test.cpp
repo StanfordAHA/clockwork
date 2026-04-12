@@ -19809,7 +19809,11 @@ void postprocessing_for_init_ops(CodegenOptions& options, schedule_info & sched,
     sched.op_offset_within_parent[op->name] = offset;
     for (auto init_op: init_ops) {
       assert(sched.op_offset_within_parent[init_op->name] <= offset);
-      sched.op_offset_within_parent[init_op->name] = offset - buffer_load_latency(options) - buffer_store_latency(options);
+      // Place the init op so that it finishes (including store latency)
+      // right when the update op starts. op_latency already accounts for
+      // load, compute, and store latencies of the init op.
+      int init_offset = offset - op_latency(init_op, sched);
+      sched.op_offset_within_parent[init_op->name] = max(0, init_offset);
       cout << "force inner op: " << init_op->name << ", has same offset as update: " << offset << endl;
     }
     cout << "inner ops: " << op->name << ", offset: "<< offset << endl;
