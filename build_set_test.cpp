@@ -21107,7 +21107,12 @@ void compile_for_garnet_dual_port_mem(prog& prg,
   options.debug_options.traceWave = true;
   options.add_memory_hierarchy("mem");
   options.add_memory_hierarchy("glb");
-  options.mem_hierarchy.at("mem").set_config_dp();
+  // Only apply hardcoded set_config_dp() when no external collateral JSON
+  // is loaded -otherwise the JSON already has the correct config.
+  const char* _lake_json = std::getenv("LAKE_COLLATERAL_JSON_MEM");
+  if (!_lake_json || std::string(_lake_json).empty()) {
+    options.mem_hierarchy.at("mem").set_config_dp();
+  }
   if (multi_level_mem) {
     options.add_memory_hierarchy("regfile");
     options.rtl_options.double_buffer_optimization = false;

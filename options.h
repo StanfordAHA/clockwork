@@ -242,7 +242,7 @@ struct LakeCollateral {
                 bank_num = {{"glb", 1}};
                 capacity = {{"glb", 131072}};
                 controller_name = {"glb"};
-            } else if (level != "mem") {
+            } else {
                 cout << "\t\tERROR: Memory component not identified" << endl;
                 assert(false);
             }
