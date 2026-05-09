@@ -1506,8 +1506,16 @@ void UBufferImpl::bank_merging_and_rewrite(CodegenOptions & options) {
     }
 
     // Skip merging for banks targeting single-port memories that already have
-    // both readers and writers (single-port cannot do simultaneous R+W)
-    if (!options.mem_hierarchy.at("mem").single_port.empty()) {
+    // both readers and writers (single-port cannot do simultaneous R+W).
+    // Exception: if the device exposes multiple interconnect ports, the tile's
+    // AGG/TB buffering shields the SRAM macro from simultaneous R+W, and we
+    // want to merge banks into a single multi-port tile rather than emit
+    // separate banks per port.
+    bool multi_port_device =
+        options.mem_hierarchy.at("mem").interconnect_in_num > 1 ||
+        options.mem_hierarchy.at("mem").interconnect_out_num > 1;
+    if (!multi_port_device &&
+        !options.mem_hierarchy.at("mem").single_port.empty()) {
         bool any_single_port = false;
         for (auto& sp : options.mem_hierarchy.at("mem").single_port) {
             if (sp.second) { any_single_port = true; break; }
@@ -2737,9 +2745,9 @@ Json UBuffer::generate_ubuf_args(CodegenOptions& options,
    string ctrl_cfg_name = "in2"+ctrl_name+"_" + str(in_cnt);
    if (num_in_dims(sched) > mem.get_ctrl_iter_level(ctrl_cfg_name) + 1) {
      auto pad_pair = pad_domain(sched, (linear_acc_map));
-     m_pair = merge_dom_dim(pad_pair.first, pad_pair.second);
+     m_pair = merge_dom_dim(pad_pair.first, pad_pair.second, mem.counter_ub);
    } else {
-     m_pair = merge_dom_dim(sched, linear_acc_map);
+     m_pair = merge_dom_dim(sched, linear_acc_map, mem.counter_ub);
    }
    auto new_sched = m_pair.first;
    cout << tab(1) << "After Merge: " << endl;
@@ -2783,9 +2791,9 @@ Json UBuffer::generate_ubuf_args(CodegenOptions& options,
    string ctrl_cfg_name = ctrl_name + "2out" + "_" + str(out_cnt);
    if (num_in_dims(sched) > mem.get_ctrl_iter_level(ctrl_cfg_name) + 1) {
      auto pad_pair = pad_domain(sched, (linear_acc_map));
-     m_pair = merge_dom_dim(pad_pair.first, pad_pair.second);
+     m_pair = merge_dom_dim(pad_pair.first, pad_pair.second, mem.counter_ub);
    } else {
-     m_pair = merge_dom_dim(sched, linear_acc_map);
+     m_pair = merge_dom_dim(sched, linear_acc_map, mem.counter_ub);
    }
    auto new_sched = m_pair.first;
    cout << tab(1) << "After Merge: " << endl;
@@ -2871,7 +2879,7 @@ Json UBuffer::generate_ubuf_args_old(CodegenOptions& options, UBuffer& ubuf, str
                 //add a simplify optimization pass,
                 //reutrn:    pair(schedulem access_map)
                 auto pad_pair = pad_domain(sched, to_map(linear_acc_map));
-                auto m_pair = merge_dom_dim(pad_pair.first, pad_pair.second);
+                auto m_pair = merge_dom_dim(pad_pair.first, pad_pair.second, mem.counter_ub);
                 auto new_sched = m_pair.first;
                 cout << tab(1) << "After Merge: " << endl;
                 cout << tab(2) << "schedule: " << str(new_sched) << endl;
@@ -2899,7 +2907,7 @@ Json UBuffer::generate_ubuf_args_old(CodegenOptions& options, UBuffer& ubuf, str
                 cout << tab(2) << "sched: " << str(sched) << endl;
                 cout << tab(2) << "reduce_map: " << str(reduce_map) << endl;
                 auto pad_pair = pad_domain(sched, to_map(linear_acc_map));
-                auto m_pair = merge_dom_dim(pad_pair.first, pad_pair.second);
+                auto m_pair = merge_dom_dim(pad_pair.first, pad_pair.second, mem.counter_ub);
                 auto new_sched = m_pair.first;
                 cout << tab(1) << "After Merge: " << endl;
                 cout << tab(2) << "schedule: " << str(new_sched) << endl;
@@ -6252,7 +6260,8 @@ bool build_delay_map(UBuffer& buf, map<string, vector<pair<string, int> > >& del
 
 //This is an optimization pass
 //take both access map and schedule and merge the dimension
-pair<isl_map*, isl_map*> merge_dom_dim(isl_map* schedule, isl_map* acc_map) {
+pair<isl_map*, isl_map*> merge_dom_dim(isl_map* schedule, isl_map* acc_map,
+                                       int max_merged_extent) {
     auto a_map = cpy(acc_map);
     auto sched = cpy(schedule);
     int merge_cnt = 0;
@@ -6265,11 +6274,42 @@ pair<isl_map*, isl_map*> merge_dom_dim(isl_map* schedule, isl_map* acc_map) {
 
     cout << "\taccess map merge pair: " << all_pair_a << endl;
     cout << "\tschedule merge pair: " << all_pair_s << endl;
+    cout << "\tmax_merged_extent (counter_ub gate): " << max_merged_extent << endl;
     while(!empty(all_pair_a) && !empty(all_pair_s)) {
         auto pa = all_pair_a.front();
         auto ps = all_pair_s.front();
         cout << "merge pair: " << pa << ", " << ps << endl;
         if (pa.first == ps.first) {
+            // Honor the consumer's per-dim extent budget: if collapsing dims
+            // (pa.first, pa.second) would produce a single dim whose extent
+            // exceeds max_merged_extent, leave the dimensions un-merged so
+            // downstream codegen (lake's IterationDomain encoder) can fit
+            // each dim's count in its extent_width register.
+            //
+            // pa.first / pa.second are positions in linear_domain_map_with_index's
+            // reversed-domain convention (innermost == 0). Translate to absolute
+            // domain indices to look up extents.
+            if (max_merged_extent > 0) {
+                auto a_dom = ::domain(a_map);
+                int abs_dims = num_in_dims(a_map);
+                int abs_first = abs_dims - 1 - pa.first;
+                int abs_second = abs_dims - 1 - pa.second;
+                int ext_first = get_dim_extent(a_dom, abs_first);
+                int ext_second = get_dim_extent(a_dom, abs_second);
+                long long combined = (long long)ext_first * (long long)ext_second;
+                cout << "\tcandidate merge dims (rev " << pa.first << "," << pa.second
+                     << " -> abs " << abs_first << "," << abs_second
+                     << ") extents: " << ext_first << " * " << ext_second
+                     << " = " << combined
+                     << (combined > max_merged_extent ? "  -> SKIP (over budget)" : "")
+                     << endl;
+                if (combined > max_merged_extent) {
+                    // Drop this candidate without merging and continue.
+                    all_pair_a.erase(all_pair_a.begin());
+                    all_pair_s.erase(all_pair_s.begin());
+                    continue;
+                }
+            }
             unordered_set<int> tmp({pa.first, pa.second});
             cout << "access map: " << str(a_map) << endl;
             auto reduce_map = linear_domain_map_with_index(domain(a_map), tmp);

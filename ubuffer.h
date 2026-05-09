@@ -4244,8 +4244,13 @@ bool all_schedules_defined(UBuffer& buf);
 bool is_register(UBuffer& buf);
 
 //This is an optimization pass
-//take both access map and schedule and merge the dimension
-pair<isl_map*, isl_map*> merge_dom_dim(isl_map* schedule, isl_map* acc_map);
+//take both access map and schedule and merge the dimension.
+//max_merged_extent caps how large the merged extent of any single dim can
+//grow during merging — set this to the target's counter_ub to avoid
+//collapsing a 2D domain like 64x64 into a 1D extent=4096 that no longer
+//fits the consumer's iteration-domain counter width.
+pair<isl_map*, isl_map*> merge_dom_dim(isl_map* schedule, isl_map* acc_map,
+                                       int max_merged_extent = -1);
 
 //Shift register optimizations
 vector<pair<string, pair<string, int> >> determine_output_shift_reg_map(

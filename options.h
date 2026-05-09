@@ -473,7 +473,10 @@ struct LakeCollateral {
     void set_config_fetch2() {
        fetch_width = 2;
        max_chaining = 4;
-       dual_port_sram = true;
+       // Don't force dual_port_sram here — let the JSON-loaded value flow
+       // through. Forcing it true makes the scheduler assume simultaneous R+W
+       // is supported and place writer/reader at the same cycle parity, which
+       // collides on actual single-port SRAM hardware.
        wire_chain_en = false;
        word_width = {{"agg", 1}, {"sram", 2}, {"tb", 2}};
        in_port_width = {{"agg", 1}, {"sram", 2}, {"tb", 2}};
