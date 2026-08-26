@@ -2765,13 +2765,28 @@ CoreIR::Module*  generate_coreir_without_ctrl(CodegenOptions& options,
   // assert(false);
 
   //Add a pass to see if there is a glb
+  // 2026-08-22: the host->GLB input load determines host2glb_latency. It used
+  // to be selected by `starting_cycle == 0` (the load runs from t=0). But with
+  // deeper schedules (e.g. schedule=4 2-level at 128^2) the input GLB's first
+  // activity is at a small nonzero pipeline offset (starting_cycle==2), so the
+  // ==0 gate missed it, host2glb_latency stayed 0, and host2glb_optimization
+  // asserted `host2glb_latency != 0` (ubuffer.cpp:4910). The output GLB starts
+  // much later (after compute, starting_cycle ~10^4) and must NOT contribute.
+  // Select the input load robustly as the earliest-starting glb buffer.
+  int min_glb_start = INT_MAX;
+  for (auto& it: buffers) {
+    if (contains(it.first, "glb_stencil")) {
+      min_glb_start = std::min(min_glb_start, it.second.starting_cycle());
+    }
+  }
   for (auto& it: buffers) {
     if (contains(it.first, "glb_stencil")){
         cout << "Contains glb" << endl;
         auto buf = it.second;
         int starting_cycle = buf.starting_cycle();
         cout << starting_cycle << endl;
-        if(starting_cycle == 0) {
+        // The input-load GLB is the earliest-starting glb buffer (was `== 0`).
+        if(starting_cycle == min_glb_start) {
             //Take the output starting cycle instead of input latency
             //auto out_sched = buf.global_outpt_sched();
             //auto host2glb_latency = to_int(lexminval(to_set(range(out_sched))));
@@ -4262,9 +4277,13 @@ void addIOsWithGLBConfig(Context* c, Module* top, map<string, UBuffer>& buffers,
     if(glb_metadata->latency != 0) {
       cout << "INPUT GLB buf name: " << buf_name << endl;
       string key = pick(split_at(buf_name, "_"));
-      inst->getMetaData()["glb2out_0"] = glb_metadata->glb2cgra.at(key);
-      int old_offset = inst->getMetaData()["glb2out_0"]["cycle_starting_addr"][0] ;
-      inst->getMetaData()["glb2out_0"]["cycle_starting_addr"][0] = old_offset - glb_metadata->latency;
+      if (glb_metadata->glb2cgra.count(key)) {
+        inst->getMetaData()["glb2out_0"] = glb_metadata->glb2cgra.at(key);
+        int old_offset = inst->getMetaData()["glb2out_0"]["cycle_starting_addr"][0] ;
+        inst->getMetaData()["glb2out_0"]["cycle_starting_addr"][0] = old_offset - glb_metadata->latency;
+      } else {
+        cout << "  no glb2cgra entry for key '" << key << "'; keeping in_buf.config_file glb2out_0" << endl;
+      }
     }
 
     path[0] = "in";
@@ -4283,11 +4302,15 @@ void addIOsWithGLBConfig(Context* c, Module* top, map<string, UBuffer>& buffers,
     //Add the multi-tile glb informations
     if(glb_metadata->latency != 0) {
       cout << "OUTPUT GLB buf_name: " << buf_name << endl;
-      string key = (split_at(buf_name, "_")).at(1);
-      inst->getMetaData()["in2glb_0"] = glb_metadata->cgra2glb.at(key);
-      //inst->getMetaData()["in2glb_0"] = glb_metadata->cgra2glb;
-      int old_offset = inst->getMetaData()["in2glb_0"]["cycle_starting_addr"][0] ;
-      inst->getMetaData()["in2glb_0"]["cycle_starting_addr"][0] = old_offset - glb_metadata->latency;
+      auto buf_tokens = split_at(buf_name, "_");
+      string key = buf_tokens.size() >= 2 ? buf_tokens.at(1) : pick(buf_tokens);
+      if (glb_metadata->cgra2glb.count(key)) {
+        inst->getMetaData()["in2glb_0"] = glb_metadata->cgra2glb.at(key);
+        int old_offset = inst->getMetaData()["in2glb_0"]["cycle_starting_addr"][0] ;
+        inst->getMetaData()["in2glb_0"]["cycle_starting_addr"][0] = old_offset - glb_metadata->latency;
+      } else {
+        cout << "  no cgra2glb entry for key '" << key << "'; keeping out_buf.config_file in2glb_0" << endl;
+      }
     }
     path[0] = "in";
     path.insert(path.begin(),"_self");
@@ -4338,9 +4361,13 @@ void addIOsWithGLBConfigMetaMapper(Context* c, Module* top, map<string, UBuffer>
     if(glb_metadata->latency != 0) {
       cout << "INPUT GLB buf name: " << buf_name << endl;
       string key = pick(split_at(buf_name, "_"));
-      inst->getMetaData()["glb2out_0"] = glb_metadata->glb2cgra.at(key);
-      int old_offset = inst->getMetaData()["glb2out_0"]["cycle_starting_addr"][0] ;
-      inst->getMetaData()["glb2out_0"]["cycle_starting_addr"][0] = old_offset - glb_metadata->latency;
+      if (glb_metadata->glb2cgra.count(key)) {
+        inst->getMetaData()["glb2out_0"] = glb_metadata->glb2cgra.at(key);
+        int old_offset = inst->getMetaData()["glb2out_0"]["cycle_starting_addr"][0] ;
+        inst->getMetaData()["glb2out_0"]["cycle_starting_addr"][0] = old_offset - glb_metadata->latency;
+      } else {
+        cout << "  no glb2cgra entry for key '" << key << "'; keeping in_buf.config_file glb2out_0" << endl;
+      }
     }
 
     mdef->connect(path, {ioname,"in"});
@@ -4363,11 +4390,15 @@ void addIOsWithGLBConfigMetaMapper(Context* c, Module* top, map<string, UBuffer>
     //Add the multi-tile glb informations
     if(glb_metadata->latency != 0) {
       cout << "OUTPUT GLB buf_name: " << buf_name << endl;
-      string key = (split_at(buf_name, "_")).at(1);
-      inst->getMetaData()["in2glb_0"] = glb_metadata->cgra2glb.at(key);
-      //inst->getMetaData()["in2glb_0"] = glb_metadata->cgra2glb;
-      int old_offset = inst->getMetaData()["in2glb_0"]["cycle_starting_addr"][0] ;
-      inst->getMetaData()["in2glb_0"]["cycle_starting_addr"][0] = old_offset - glb_metadata->latency;
+      auto buf_tokens = split_at(buf_name, "_");
+      string key = buf_tokens.size() >= 2 ? buf_tokens.at(1) : pick(buf_tokens);
+      if (glb_metadata->cgra2glb.count(key)) {
+        inst->getMetaData()["in2glb_0"] = glb_metadata->cgra2glb.at(key);
+        int old_offset = inst->getMetaData()["in2glb_0"]["cycle_starting_addr"][0] ;
+        inst->getMetaData()["in2glb_0"]["cycle_starting_addr"][0] = old_offset - glb_metadata->latency;
+      } else {
+        cout << "  no cgra2glb entry for key '" << key << "'; keeping out_buf.config_file in2glb_0" << endl;
+      }
     }
 
     mdef->connect(path, {ioname,"out"});
@@ -4570,8 +4601,30 @@ bool runOnInstance(Instance* inst) {
       if (connect2IO) {
           //valid_config.at("cycle_starting_addr")[0] = (int)valid_config.at("cycle_starting_addr")[0] - latency;
           //TODO: This is a hack, need to make sure the output always called hw_output
-          inst->getMetaData()["config"][sv_name] = valid_config.at("output");
-          return true;
+          // 2026-08-22: guard the hardcoded "output" lookup. valid_config is the
+          // cgra2glb (output-direction) json; its keys are pick(split_at(buf,"_"))
+          // = the buffer's first token (e.g. "hw" for hw_output_...), never
+          // literally "output" for conv_3_3-style names. When the output does NOT
+          // go through a separate multi-tile GLB, cgra2glb is empty and the old
+          // .at("output") threw json out_of_range (blocks schedule=1 split-mem and
+          // schedule=4 2-level from CGRA mapping). Mirror the graceful count-guard
+          // pattern used in addIOsWithGLBConfig. See /aha/clockwork/CLAUDE.md.
+          if (valid_config.find("output") != valid_config.end()) {
+              inst->getMetaData()["config"][sv_name] = valid_config.at("output");
+              return true;
+          } else if (valid_config.size() == 1) {
+              // Single output buffer under a differently-named key: use it.
+              cout << "  ReplaceGLBValid: using sole cgra2glb entry (key '"
+                   << valid_config.begin().key() << "') for stencil_valid" << endl;
+              inst->getMetaData()["config"][sv_name] = valid_config.begin().value();
+              return true;
+          } else {
+              cout << "  ReplaceGLBValid: no 'output' key and "
+                   << valid_config.size()
+                   << " cgra2glb entries; skipping stencil_valid replacement"
+                   << endl;
+              return false;
+          }
       }
     }
     return false;

@@ -1796,11 +1796,33 @@ isl_set* simplify(isl_set* const m) {
 }
 
 isl_map* simplify_expr(isl_map* const m) {
-  return isl_map_from_pw_multi_aff(isl_pw_multi_aff_from_map(cpy(m)));
+  // isl_pw_multi_aff_from_map returns NULL when the map is multi-valued
+  // (a relation, not a function). On failure we try coalescing first --
+  // sometimes the same relation has a single-valued representation that
+  // isl can find after coalescence -- and otherwise return the input
+  // unchanged rather than forwarding NULL (which used to abort downstream
+  // in str() via std::string(nullptr)).
+  auto pma = isl_pw_multi_aff_from_map(cpy(m));
+  if (pma) return isl_map_from_pw_multi_aff(pma);
+  auto coalesced = isl_map_coalesce(cpy(m));
+  pma = isl_pw_multi_aff_from_map(cpy(coalesced));
+  if (pma) {
+    isl_map_free(coalesced);
+    return isl_map_from_pw_multi_aff(pma);
+  }
+  return coalesced;
 }
 
 umap* simplify(umap* const m) {
-  return to_umap(isl_map_from_pw_multi_aff(isl_pw_multi_aff_from_map(to_map(cpy(m)))));
+  auto pma = isl_pw_multi_aff_from_map(to_map(cpy(m)));
+  if (pma) return to_umap(isl_map_from_pw_multi_aff(pma));
+  auto coalesced = isl_map_coalesce(to_map(cpy(m)));
+  pma = isl_pw_multi_aff_from_map(cpy(coalesced));
+  if (pma) {
+    isl_map_free(coalesced);
+    return to_umap(isl_map_from_pw_multi_aff(pma));
+  }
+  return to_umap(coalesced);
 }
 
 bool single_valued(isl_map* const m0) {
@@ -4876,8 +4898,22 @@ isl_multi_aff* get_multi_aff(isl_union_map* m) {
 
 isl_multi_aff* get_multi_aff(isl_map* m) {
   auto lm = isl_pw_multi_aff_from_map(cpy(m));
-  //cout << tab(1) << str(m) << endl;
-  //cout << tab(2) << "lexmax: " << str(lm) << endl;
+  if (!lm) {
+    // Try coalescing the relation; it may have a single-valued
+    // representation that isl can find post-coalesce.
+    auto coalesced = isl_map_coalesce(cpy(m));
+    lm = isl_pw_multi_aff_from_map(coalesced);
+  }
+  if (!lm) {
+    cerr << "ERROR: get_multi_aff() called on a multi-valued map; "
+            "isl could not extract a single affine function. Map:\n  "
+         << str(m) << endl
+         << "This typically means the schedule produces a relation rather "
+            "than a function (e.g. an inner CGRA tile that splits a wider "
+            "fetch port). Such schedules are not yet supported by clockwork's "
+            "single-aff codegen path." << endl;
+    throw std::runtime_error("get_multi_aff: multi-valued map not supported");
+  }
   vector<pair<isl_set*, isl_multi_aff*> > pieces =
     get_pieces(lm);
   assert(pieces.size() == 1);
@@ -4888,8 +4924,20 @@ isl_multi_aff* get_multi_aff(isl_map* m) {
 
 isl_aff* get_aff(isl_map* m) {
   auto lm = isl_pw_multi_aff_from_map(cpy(m));
-  //cout << tab(1) << str(m) << endl;
-  //cout << tab(2) << "lexmax: " << str(lm) << endl;
+  if (!lm) {
+    auto coalesced = isl_map_coalesce(cpy(m));
+    lm = isl_pw_multi_aff_from_map(coalesced);
+  }
+  if (!lm) {
+    cerr << "ERROR: get_aff() called on a multi-valued map; "
+            "isl could not extract a single affine function. Map:\n  "
+         << str(m) << endl
+         << "This typically means the schedule produces a relation rather "
+            "than a function (e.g. an inner CGRA tile that splits a wider "
+            "fetch port). Such schedules are not yet supported by clockwork's "
+            "single-aff codegen path." << endl;
+    throw std::runtime_error("get_aff: multi-valued map not supported");
+  }
   vector<pair<isl_set*, isl_multi_aff*> > pieces =
     get_pieces(lm);
   assert(pieces.size() == 1);
@@ -4897,6 +4945,55 @@ isl_aff* get_aff(isl_map* m) {
   auto saff = pieces.at(0).second;
   auto aff = isl_multi_aff_get_aff(saff, 0);
   return aff;
+}
+
+// Pad input-dim coefficients on the addr_dim's affine of a map up to a
+// multiple of fetch_width. Used before composing a floor-based slice (which
+// isl can't symbolically simplify when coefficients aren't aligned). The
+// output map has a wider per-tile range; downstream input_range queries
+// pick up the new extent automatically.
+//
+// If the input map is itself multi-valued (no clean pw_multi_aff), or has
+// multiple pieces, returns the input unchanged. If no padding is needed,
+// returns the input unchanged.
+isl_map* pad_addr_dim_to_fetch_width(isl_map* m, int addr_dim, int fetch_width) {
+  if (fetch_width <= 1) return cpy(m);
+  auto pma = isl_pw_multi_aff_from_map(cpy(m));
+  if (!pma) return cpy(m);
+  vector<pair<isl_set*, isl_multi_aff*> > pieces = get_pieces(pma);
+  if (pieces.size() != 1) return cpy(m);
+  isl_multi_aff* saff = pieces.at(0).second;
+  int n_out = get_size(saff);
+  if (addr_dim < 0 || addr_dim >= n_out) return cpy(m);
+
+  isl_aff* addr_aff = isl_multi_aff_get_aff(saff, addr_dim);
+  int n_in = isl_aff_dim(addr_aff, isl_dim_in);
+  bool changed = false;
+  for (int i = 0; i < n_in; i++) {
+    isl_val* c = isl_aff_get_coefficient_val(addr_aff, isl_dim_in, i);
+    long ci = isl_val_get_num_si(c);
+    isl_val_free(c);
+    if (ci > 0 && ci % fetch_width != 0) {
+      long ci_pad = ((ci + fetch_width - 1) / fetch_width) * fetch_width;
+      isl_val* v = isl_val_int_from_si(ctx(m), ci_pad);
+      addr_aff = isl_aff_set_coefficient_val(addr_aff, isl_dim_in, i, v);
+      changed = true;
+    }
+  }
+  if (!changed) {
+    isl_aff_free(addr_aff);
+    return cpy(m);
+  }
+  saff = isl_multi_aff_set_aff(saff, addr_dim, addr_aff);
+  isl_map* padded = isl_map_from_multi_aff(saff);
+  // Re-attach the original domain so isl knows the variables' bounds.
+  // Without this, downstream LP solvers see unbounded coordinates and abort.
+  padded = isl_map_intersect_domain(padded, isl_map_domain(cpy(m)));
+  cout << "[pad_addr_dim] padded addr_dim=" << addr_dim
+       << " coefs to multiple of fetch_width=" << fetch_width << endl;
+  cout << "[pad_addr_dim] before: " << str(m) << endl;
+  cout << "[pad_addr_dim] after:  " << str(padded) << endl;
+  return padded;
 }
 
 std::vector<isl_aff*> get_affs(isl_multi_aff* saff) {

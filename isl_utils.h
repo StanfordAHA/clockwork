@@ -736,6 +736,7 @@ isl_map* diff(isl_map* const m0, isl_map* const m1);
 isl_aff* get_aff(isl_map* m);
 isl_aff* get_aff(isl_union_map* m);
 std::vector<isl_aff*> get_aff_vec(isl_map* m);
+isl_map* pad_addr_dim_to_fetch_width(isl_map* m, int addr_dim, int fetch_width);
 
 
 string str(isl_mat* const ineqmat);

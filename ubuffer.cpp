@@ -9993,6 +9993,14 @@ void UBuffer::generate_banks(CodegenOptions& options) {
     //Finding the delayfor SRAM access
     bool adjust = true;
     int step = 0;
+    // Step-cap raised from 100 (2026-08-24): the -1-per-step sram2tb delay
+    // search needs O(tile-schedule-span) iterations, which exceeds 100 for
+    // large tiles / large images (e.g. conv_3_3 at 256^2). The loop converges
+    // once temp_sched no longer violates the sram wr/rd deps, so a higher cap
+    // only turns previously-aborting large configs into successful compiles;
+    // it never changes an already-converging (<100) schedule. Kept finite so a
+    // genuine non-convergence still aborts loudly rather than hanging.
+    const int STEP_CAP = 200000;
     while (adjust) {
         adjust = false;
         //adjust against write
@@ -10001,7 +10009,8 @@ void UBuffer::generate_banks(CodegenOptions& options) {
             temp_sched = linear_schedule(temp_sched, {1}, -1, false);
             adjust = true;
             step ++;
-            assert(step < 100);
+            if (step == 100) cout << "\t[sram2tb] step-cap>100 engaged (large tile); continuing to " << STEP_CAP << endl;
+            assert(step < STEP_CAP);
         }
         //adjust against read
         while(violate_deps(temp_sched, sram_rd)) {
@@ -10010,7 +10019,8 @@ void UBuffer::generate_banks(CodegenOptions& options) {
             cout << "\tadjust temp sched: " << str(temp_sched) << endl;
             adjust = true;
             step ++;
-            assert(step < 100);
+            if (step == 100) cout << "\t[sram2tb] step-cap>100 engaged (large tile); continuing to " << STEP_CAP << endl;
+            assert(step < STEP_CAP);
         }
     }
     return cpy(temp_sched);
@@ -10766,6 +10776,13 @@ void UBuffer::generate_banks(CodegenOptions& options) {
 
         //access map
         auto acc_vec = dot(trans, acc_0);
+        // Pad addr_dim's input-dim coefficients up to a multiple of fetch_width
+        // so the floor-by-fetch_width in the slice below simplifies to a clean
+        // affine. Without this, schedules where mem_x % fetch_width != 0
+        // produce a multi-valued relation that downstream get_aff() rejects.
+        // Pads at most fetch_width-1 columns per inter-tile stride; SRAM
+        // input_range tracks via the wider access map.
+        acc_vec = pad_addr_dim_to_fetch_width(acc_vec, addr_dim, fetch_width);
         auto slice = get_set_slice(range(acc_0), addr_dim, fetch_width);
         acc_vec = dot(acc_vec, slice);
 
