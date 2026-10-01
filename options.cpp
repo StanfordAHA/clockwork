@@ -14,6 +14,57 @@ banking_strategy CodegenOptions::get_banking_strategy(const std::string& buffer)
   return map_find(buffer, banking_strategies);
 }
 
+// 2026-10: lake emits the PE-tile pond's collateral for the regfile level with
+// its storage keyed "regfile" (lake.utils.pond_collateral). A generic fw=1 lake
+// collateral keys its single storage "mem" / "sram" (in2mem_N, mem2out_N);
+// accept that too by renaming the one storage key to "regfile", since the
+// regfile level looks everything up as capacity.at("regfile"), in2regfile_N, ...
+static void normalize_regfile_collateral(LakeCollateral& lc) {
+    if (lc.capacity.count("regfile") || lc.capacity.size() != 1) {
+        lc.controller_name = {"regfile"};
+        return;
+    }
+    string key = lc.capacity.begin()->first;
+    cout << "\tregfile collateral: storage key '" << key << "' -> 'regfile'" << endl;
+    auto rename_int = [&](std::unordered_map<string, int>& m) {
+        if (m.count(key)) { m["regfile"] = m.at(key); m.erase(key); }
+    };
+    rename_int(lc.capacity);
+    rename_int(lc.word_width);
+    rename_int(lc.bank_num);
+    rename_int(lc.in_port_width);
+    rename_int(lc.out_port_width);
+    if (lc.single_port.count(key)) { lc.single_port["regfile"] = lc.single_port.at(key); lc.single_port.erase(key); }
+    map<string, int> ilm;
+    for (auto& kv : lc.iter_level_map) {
+        string k = kv.first;
+        if (k.rfind("in2" + key + "_", 0) == 0) {
+            k = "in2regfile_" + k.substr(4 + key.size());
+        } else if (k.rfind(key + "2out_", 0) == 0) {
+            k = "regfile2out_" + k.substr(key.size() + 5);
+        }
+        ilm[k] = kv.second;
+    }
+    lc.iter_level_map = ilm;
+    lc.controller_name = {"regfile"};
+}
+
+static LakeCollateral g_regfile_collateral;
+static bool g_has_regfile_collateral = false;
+
+static void record_regfile_collateral(const LakeCollateral& lc) {
+    g_regfile_collateral = lc;
+    g_has_regfile_collateral = true;
+    cout << "\tregfile (pond) collateral: capacity " << lc.capacity.at("regfile")
+         << ", iteration_level " << lc.iteration_level << ", counter_ub " << lc.counter_ub
+         << ", sched_counter_ub " << lc.sched_counter_ub
+         << ", interconnect " << lc.interconnect_in_num << "/" << lc.interconnect_out_num << endl;
+}
+
+const LakeCollateral* loaded_regfile_collateral() {
+    return g_has_regfile_collateral ? &g_regfile_collateral : nullptr;
+}
+
 void CodegenOptions::add_memory_hierarchy(const std::string& level) {
     // Check for external collateral JSON via environment variable:
     //   LAKE_COLLATERAL_JSON_<LEVEL> (e.g., LAKE_COLLATERAL_JSON_MEM)
@@ -25,6 +76,10 @@ void CodegenOptions::add_memory_hierarchy(const std::string& level) {
     if (json_path && std::string(json_path).size() > 0) {
         cout << "\tLoading " << level << " collateral from: " << json_path << endl;
         LakeCollateral mem = load_lake_collateral_from_json(json_path);
+        if (level == "regfile") {
+            normalize_regfile_collateral(mem);
+            record_regfile_collateral(mem);
+        }
         mem_hierarchy.insert({level, mem});
     } else {
         LakeCollateral mem(level);
@@ -158,6 +213,8 @@ LakeCollateral load_lake_collateral_from_json(const std::string& filepath) {
     lc.wire_chain_en = j.value("wire_chain_en", false);
     lc.interconnect_in_num = j.value("interconnect_in_num", 1);
     lc.interconnect_out_num = j.value("interconnect_out_num", 1);
+    lc.sched_counter_ub = j.value("sched_counter_ub", 65535);
+    lc.data_width = j.value("data_width", 16);
 
     // Map<string, int> fields
     auto load_str_int_map = [](const nlohmann::json& j, const std::string& key) {

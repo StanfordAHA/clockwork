@@ -193,6 +193,12 @@ struct LakeCollateral {
     bool dual_port_sram;
     bool wire_chain_en;
     int interconnect_in_num, interconnect_out_num;
+    // 2026-10: schedule (cycle) counter bound, distinct from counter_ub (the
+    // iteration-extent bound): a lake static pond schedules on 16-bit cycles but
+    // may have narrower iteration domains. Emitted by lake for the regfile level.
+    int sched_counter_ub = 65535;
+    // 2026-10: storage data width (bits); emitted by lake for the regfile level.
+    int data_width = 16;
 
     LakeCollateral() {}
 
@@ -635,3 +641,9 @@ struct mem_access_cnt {
 LakeCollateral create_single_port_wide_fetch_memory(int fetch_width, int capacity, int SIPO_num);
 LakeCollateral create_dual_port_memory(int capacity);
 LakeCollateral load_lake_collateral_from_json(const std::string& filepath);
+
+// 2026-10: the PE-tile pond's lake collateral (LAKE_COLLATERAL_JSON_REGFILE), or
+// nullptr when the regfile level uses the built-in preset. Recorded by
+// add_memory_hierarchy("regfile") for helpers that have no CodegenOptions (the
+// RV pond fitting: rv_pond_dims / rv_pond_max_extent).
+const LakeCollateral* loaded_regfile_collateral();

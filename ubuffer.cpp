@@ -2724,8 +2724,30 @@ Json UBuffer::generate_ubuf_args(CodegenOptions& options,
  int in_cnt = 0, out_cnt = 0;
  string ctrl_name = pick(mem.controller_name);
 
+ // 2026-10: a pond's in2regfile_N / regfile2out_N must configure the
+ // data_in/out_pond_N it drives. Wires are numbered by
+ // UBufferImpl::sort_bank_port (update port first, then DESCENDING name), the
+ // *_update_priority lists order the rest ASCENDING; they agree only with <= 1
+ // non-update port per direction (every accumulation pond). The legacy pond
+ // masked a mismatch on its outputs (both show one shared read address); a
+ // lake-spec pond's outputs are independent. So follow the wire order.
+ auto in_order = ubuf.get_in_ports_update_priority();
+ auto out_order = ubuf.get_out_ports_update_priority();
+ if (mem_name == "regfile") {
+   auto wire_order = [&ubuf](vector<string> pts) {
+     std::stable_sort(pts.begin(), pts.end(), [&ubuf](const string& l, const string& r) {
+       bool ls = ubuf.is_self_loop(l), rs = ubuf.is_self_loop(r);
+       if (ls != rs) return ls;
+       return l > r;
+     });
+     return pts;
+   };
+   in_order = wire_order(in_order);
+   out_order = wire_order(out_order);
+ }
+
  //TODO: change into a method that sort input by update first, then by name
- for (auto inpt: ubuf.get_in_ports_update_priority()) {
+ for (auto inpt: in_order) {
    auto acc_map = to_map(ubuf.access_map.at(inpt));
    acc_map = remove_irrelevant_in_dim(acc_map);
    auto sched = to_map(ubuf.schedule.at(inpt));
@@ -2772,7 +2794,7 @@ Json UBuffer::generate_ubuf_args(CodegenOptions& options,
    in_cnt ++;
  }
 
- for (auto inpt: ubuf.get_out_ports_update_priority()) {
+ for (auto inpt: out_order) {
    auto acc_map = to_map(ubuf.access_map.at(inpt));
    acc_map = remove_irrelevant_in_dim(acc_map);
    auto sched = to_map(ubuf.schedule.at(inpt));
@@ -4163,9 +4185,12 @@ string UBuffer::determine_config_mode(CodegenOptions& options, UBuffer& target_b
   bool multi_level_mem = options.mem_hierarchy.count("regfile");
   //TODO: this mode determine is hacky
   //Changing the size of pond threshold
+  // 2026-10: pond capacity from the regfile collateral (preset / default pond: 32)
+  int pond_capacity = multi_level_mem ?
+    options.mem_hierarchy.at("regfile").get_single_tile_capacity() : 0;
   if (contains(target_buf.name, "_glb_stencil")) {
     config_mode = "glb";
-  } else if (capacity <= 32 && multi_level_mem )  {
+  } else if (capacity <= pond_capacity && multi_level_mem )  {
     cout << "Generate config for register file!" << endl;
     config_mode = "pond";
 
