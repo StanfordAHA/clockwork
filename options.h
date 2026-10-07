@@ -141,6 +141,14 @@ class ConstantOffset: public CtrlConstraints {
 };
 
 
+// A ready-valid compile: DENSE_READY_VALID=1 and not the thesis sweep's static
+// runtime (which may also set it; LAKE_SPEC_MODE=static|rv).
+inline bool dense_rv_compile() {
+  const char* rv = std::getenv("DENSE_READY_VALID");
+  const char* mode = std::getenv("LAKE_SPEC_MODE");
+  return rv && rv[0] == '1' && !(mode && std::string(mode) == "static");
+}
+
 struct LakeCollateral {
 
     //New lake collateral
@@ -193,6 +201,8 @@ struct LakeCollateral {
     bool dual_port_sram;
     bool wire_chain_en;
     int interconnect_in_num, interconnect_out_num;
+    // set by load_lake_collateral_from_json (a lake spec's own collateral)
+    bool from_json = false;
     // 2026-10: schedule (cycle) counter bound, distinct from counter_ub (the
     // iteration-extent bound): a lake static pond schedules on 16-bit cycles but
     // may have narrower iteration domains. Emitted by lake for the regfile level.
@@ -477,6 +487,17 @@ struct LakeCollateral {
 
 
     void set_config_fetch2() {
+       // 2026-09-30: a ready-valid compile against a lake spec's JSON
+       // collateral keeps the spec's own bank counts and capacities. The
+       // preset below (2 ports per bank, 1024 SRAM words) mis-sizes fw2 specs
+       // with 1 data port (a second reader or writer was mapped onto the
+       // filter path, which has its own storage) and small / large SRAMs.
+       // Static compiles keep the preset: not DENSE_READY_VALID, or the
+       // thesis sweep's static runtime (it sets DENSE_READY_VALID=1 for both
+       // modes and LAKE_SPEC_MODE=static|rv).
+       if (from_json && dense_rv_compile()) {
+         return;
+       }
        fetch_width = 2;
        max_chaining = 4;
        // Don't force dual_port_sram here — let the JSON-loaded value flow
@@ -524,20 +545,30 @@ struct LakeCollateral {
         return c;
     }
 
+    // 2026-09-28: a multi-level hierarchy is not necessarily AGG/SRAM/TB. The
+    // ready-valid fw=1 spec (lake build_spec_rv, vec_width=1) is {mem, filter}:
+    // the RV "filter" side level makes bank_num.size()==2 with no agg/tb, and
+    // bank_num.at("agg") threw std::out_of_range. Prefer agg/tb when present,
+    // else the "mem" data level; otherwise unchanged (every hierarchy that
+    // worked before returns the same value).
     int get_inpt_num() {
+        if (bank_num.count("agg"))
+            return bank_num.at("agg");
         if (bank_num.size() == 1)
             return pick(bank_num).second;
-        else {
-            return bank_num.at("agg");
-        }
+        if (bank_num.count("mem"))
+            return bank_num.at("mem");
+        return bank_num.at("agg");
     }
 
     int get_outpt_num() {
+        if (bank_num.count("tb"))
+            return bank_num.at("tb");
         if (bank_num.size() == 1)
             return pick(bank_num).second;
-        else {
-            return bank_num.at("tb");
-        }
+        if (bank_num.count("mem"))
+            return bank_num.at("mem");
+        return bank_num.at("tb");
     }
 
 };

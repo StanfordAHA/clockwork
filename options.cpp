@@ -202,6 +202,7 @@ LakeCollateral load_lake_collateral_from_json(const std::string& filepath) {
     LakeCollateral lc;
 
     // Scalar fields
+    lc.from_json = true;
     lc.fetch_width = j.value("fetch_width", 1);
     lc.max_chaining = j.value("max_chaining", 4);
     lc.iteration_level = j.value("iteration_level", 6);

@@ -774,7 +774,24 @@ isl_map* UBuffer::get_coarse_grained_pipeline_schedule(CodegenOptions& options, 
   if (options.rtl_options.double_buffer_optimization == false)
     need_double_buffer = false;
   cout << "\tNeed double buffer optimization: " << need_double_buffer << endl;
-  substract_glb_latency = (max_start >= options.mem_hierarchy.at("mem").counter_ub);
+  // 2026-09-30: a pond buffer's controllers count on the pond's own 16-bit
+  // cycle counter (regfile level, counter_ub 65535), not the MEM tile's (the
+  // lake collateral's 2047): static resnet_pond on fw2 specs (double-buffered
+  // pond, start 3800) asserted in host2glb_optimization with no GLB input.
+  int counter_ub = options.mem_hierarchy.at("mem").counter_ub;
+  if (config_mode == "pond" && options.mem_hierarchy.count("regfile")) {
+    // 2026-10: the pond's SCHEDULE counter bound (a lake pond collateral
+    // separates it from the iteration-extent counter_ub; preset: both 65535)
+    counter_ub = options.mem_hierarchy.at("regfile").sched_counter_ub;
+  }
+  substract_glb_latency = (max_start >= counter_ub);
+  // 2026-09-30: the host->GLB latency trick only keeps STATIC cycle counters
+  // in range; a ready-valid tile runs its RV program, and without a GLB-staged
+  // input host2glb_latency is 0 (host2glb_optimization asserted).
+  if (substract_glb_latency && dense_rv_compile()) {
+    cout << "RV compile: not subtracting the GLB latency (start " << max_start << " >= counter_ub)" << endl;
+    substract_glb_latency = false;
+  }
 
   //This is an optimization
   //flatten the coarse grained schedule for tiling loop
@@ -850,6 +867,18 @@ isl_map* UBuffer::get_coarse_grained_pipeline_schedule(CodegenOptions& options, 
         new_ub.add_out_pt(pt_name, ::domain(new_pt_sched), new_acc_map, new_pt_sched);
   }
   cout << "pt min offset : " << min_offset << endl;
+  // 2026-09-30: with decoupled control (no double buffer) the port schedules
+  // above are rebased to the coarse-grained iteration (-min_offset) and the
+  // absolute start lives in the cgpl controller that drives flush
+  // (cgpl_post_processing), so the GLB-latency subtraction -- the alternative
+  // for buffers on the absolute counter -- is not needed (found on static
+  // resnet_block_pond's conv2 pond, start 39695, when ponds were still checked
+  // against the MEM counter bound).
+  if (substract_glb_latency && decouple_ctrl) {
+    cout << "decoupled control: not subtracting the GLB latency (start " << max_start
+         << " >= counter_ub " << counter_ub << ")" << endl;
+    substract_glb_latency = false;
+  }
   assert(!(substract_glb_latency && decouple_ctrl));
 
   return cgpl_sched;
@@ -4202,7 +4231,426 @@ string UBuffer::determine_config_mode(CodegenOptions& options, UBuffer& target_b
   return config_mode;
 }
 
-Json UBuffer::add_rv_info_to_json(Json config_file, UBuffer& target_buf) {
+// 2026-09-29: ready-valid accumulation pond. An accumulator in a pond (e.g.
+// matmul's mul_stencil with -enable_ponds) has four ports on one address: the
+// init write w_init and the final read r_final once per output pixel, and the
+// update op's read r_upd / write w_upd once per (pixel, reduction) iteration.
+// Statically a flush controller restarts the pond every pixel (coarse-grained
+// pipeline); counters that restart cannot order pixel p+1's init after pixel
+// p's final read, so a ready-valid pond keeps the pixel loops and runs lake's
+// vector-accumulation program (lake hack_rv_mem_pond_bitstream
+// get_vec_accum_pond). Its init port is the pond's dangling flush port: each
+// step clears the memory and consumes no data (the init value must be 0).
+//   r_upd reads k once w_upd wrote k-1               (r_upd,0 | w_upd,0, -1)
+//   r_final reads p once w_upd moved past pixel p    (r_final,0 | w_upd,1, 0)
+//   r_upd starts pixel p once w_init cleared p       (r_upd,1 | w_init,0, 0)
+//   w_init clears p+1 once r_final read p            (w_init,0 | r_final,0, 1)
+// Lake level 0 of the update ports is the (coalesced) reduction, the level(s)
+// above are the pixel loops (coalesced when short enough).
+struct RVPondAccum {
+  string w_upd, r_upd, w_init, r_final;
+  int n_pix;   // pixel loops (outermost, shared by all ports), excluding root
+  int n_red;   // reduction loops of the update op, inside the pixel loops
+};
+
+// lake build_pond_rv (garnet's pond): 11-bit iteration domains, extents
+// 2..2048. A level whose wrap fixup can fire (the update ports' reduction
+// level, and every pixel level when they are not coalesced) adds its extent
+// to an 11-bit counter, so it must stay <= half of that. RV_POND_MAX_EXTENT
+// overrides the domain limit (debug: forces the multi-level pixel path).
+static int rv_pond_max_extent() {
+  if (const char* m = std::getenv("RV_POND_MAX_EXTENT")) {
+    return atoi(m);
+  }
+  // 2026-10: the pond's lake collateral carries its iteration-extent bound
+  if (auto pc = loaded_regfile_collateral()) {
+    return pc->counter_ub + 1;
+  }
+  return 2048;
+}
+
+static bool rv_pond_accumulation(UBuffer& buf, RVPondAccum& pa) {
+  auto fail = [&](const string& why) {
+    cout << "RV pond " << buf.name << ": not an accumulation pond (" << why << ")" << endl;
+    return false;
+  };
+  auto ins = buf.get_in_ports();
+  auto outs = buf.get_out_ports();
+  if (ins.size() != 2 || outs.size() != 2) {
+    return fail("needs 2 in and 2 out ports");
+  }
+  for (auto p : buf.get_all_ports()) {
+    if (!buf.domain.count(p) || !buf.access_map.count(p) || !buf.schedule.count(p) ||
+        empty(buf.access_map.at(p)) || empty(buf.schedule.at(p)) ||
+        num_in_dims(to_map(buf.schedule.at(p))) != ::num_dims(buf.domain.at(p))) {
+      return fail("port " + p + " lacks a domain/access map/schedule");
+    }
+  }
+  int n_upd = 0;
+  for (auto w : ins) {
+    for (auto r : outs) {
+      if (::name(buf.domain.at(w)) == ::name(buf.domain.at(r))) {
+        pa.w_upd = w;
+        pa.r_upd = r;
+        n_upd++;
+      }
+    }
+  }
+  if (n_upd != 1) {
+    return fail("needs exactly one update op");
+  }
+  pa.w_init = ins.at(0) == pa.w_upd ? ins.at(1) : ins.at(0);
+  pa.r_final = outs.at(0) == pa.r_upd ? outs.at(1) : outs.at(0);
+
+  // loop structure: the init / final ops iterate the pixel loops, the update
+  // op the same pixel loops plus the reduction loops
+  auto dom = [&](const string& p) { return buf.domain.at(p); };
+  int dp = ::num_dims(dom(pa.w_init)) - 1;
+  int du = ::num_dims(dom(pa.w_upd)) - 1;
+  if (::num_dims(dom(pa.r_final)) - 1 != dp || ::num_dims(dom(pa.r_upd)) - 1 != du || du <= dp) {
+    return fail("update loops are not the pixel loops plus reduction loops");
+  }
+  pa.n_pix = dp;
+  pa.n_red = du - dp;
+  for (auto p : buf.get_all_ports()) {
+    auto ex = extents(dom(p));
+    int pts = 1;
+    for (int l = 1; l < (int) ex.size(); l++) {
+      pts *= ex.at(l);
+    }
+    if (int_upper_bound(card(dom(p))) != pts) {
+      return fail("port " + p + " domain is not a box");
+    }
+  }
+  auto pix_ex = extents(dom(pa.w_init));
+  auto pix_min = mins(dom(pa.w_init));
+  int n_pixels = 1;
+  for (auto p : buf.get_all_ports()) {
+    auto ex = extents(dom(p));
+    auto mn = mins(dom(p));
+    for (int l = 1; l <= dp; l++) {
+      if (ex.at(l) != pix_ex.at(l) || mn.at(l) != pix_min.at(l)) {
+        return fail("port " + p + " iterates other pixel loops");
+      }
+    }
+  }
+  for (int l = 1; l <= dp; l++) {
+    n_pixels *= pix_ex.at(l);
+  }
+  if (n_pixels < 2) {
+    return fail("a single pixel");
+  }
+  auto upd_ex = extents(dom(pa.w_upd));
+  auto upd_min = mins(dom(pa.w_upd));
+  if (upd_ex != extents(dom(pa.r_upd)) || upd_min != mins(dom(pa.r_upd))) {
+    return fail("update read and write iterate different loops");
+  }
+  int max_extent = rv_pond_max_extent();
+  int n_red = 1;
+  for (int l = dp + 1; l <= du; l++) {
+    n_red *= upd_ex.at(l);
+  }
+  if (n_red < 2 || n_red > max_extent / 2) {
+    return fail(str(n_red) + " reduction steps (lake level extent must be in [2, " + str(max_extent / 2) + "])");
+  }
+  if (n_pixels > max_extent) {
+    for (int l = 1; l <= dp; l++) {
+      if (pix_ex.at(l) > max_extent / 2) {
+        return fail(str(n_pixels) + " pixels with a pixel loop of " + str(pix_ex.at(l)) +
+                    " (separate lake levels must be <= " + str(max_extent / 2) + ")");
+      }
+    }
+  }
+
+  // one address for every port
+  isl_set* addr = nullptr;
+  for (auto p : buf.get_all_ports()) {
+    auto rg = range(to_map(buf.access_map.at(p)));
+    if (int_upper_bound(card(rg)) != 1 || (addr != nullptr && !equal(rg, addr))) {
+      return fail("port " + p + " does not access the single accumulator address");
+    }
+    addr = rg;
+  }
+
+  // static order per pixel: init <= first update read, last update write <=
+  // final read <= next pixel's init (same pixel coefficients everywhere, so
+  // compare the times of each port's first pixel)
+  auto sched_aff = [&](const string& p) { return get_aff(to_map(buf.schedule.at(p))); };
+  vector<int> pix_coeff;
+  for (int l = 1; l <= dp; l++) {
+    pix_coeff.push_back(int_coeff(sched_aff(pa.w_init), l));
+  }
+  for (auto p : buf.get_all_ports()) {
+    for (int l = 1; l <= dp; l++) {
+      if (int_coeff(sched_aff(p), l) != pix_coeff.at(l - 1)) {
+        return fail("port " + p + " schedule has other pixel strides");
+      }
+    }
+  }
+  auto first_time = [&](const string& p) {
+    auto a = sched_aff(p);
+    auto mn = mins(dom(p));
+    int t = int_const_coeff(a);
+    for (int l = 1; l < (int) mn.size(); l++) {
+      t += int_coeff(a, l) * mn.at(l);
+    }
+    return t;
+  };
+  // time span of the reduction loops (min, max) relative to their first iteration
+  auto red_span = [&](const string& p, bool want_max) {
+    auto a = sched_aff(p);
+    int s = 0;
+    for (int l = dp + 1; l <= du; l++) {
+      int d = int_coeff(a, l) * (upd_ex.at(l) - 1);
+      s += want_max ? max(d, 0) : min(d, 0);
+    }
+    return s;
+  };
+  // smallest time between consecutive pixels
+  int step = INT_MAX;
+  for (int L = 1; L <= dp; L++) {
+    int d = pix_coeff.at(L - 1);
+    for (int l = L + 1; l <= dp; l++) {
+      d -= pix_coeff.at(l - 1) * (pix_ex.at(l) - 1);
+    }
+    step = min(step, d);
+  }
+  int t_init = first_time(pa.w_init);
+  int t_upd_first = first_time(pa.r_upd) + red_span(pa.r_upd, false);
+  int t_upd_last = first_time(pa.w_upd) + red_span(pa.w_upd, true);
+  int t_final = first_time(pa.r_final);
+  if (step <= 0 || !(t_init <= t_upd_first && t_upd_last <= t_final)) {
+    return fail("static schedule is not init <= updates <= final read (init " + str(t_init) +
+                ", updates " + str(t_upd_first) + ".." + str(t_upd_last) + ", final " + str(t_final) +
+                ", pixel step " + str(step) + ")");
+  }
+  // The next pixel's init may be scheduled before this pixel's final read
+  // (fw2 single-port resnet_pond: final +24, pixel step 23); the RV program
+  // orders it anyway (w_init <- r_final).
+  if (t_final > t_init + step) {
+    cout << "RV pond " << buf.name << ": static schedule starts the next pixel's init " << (t_final - t_init - step)
+         << " cycle(s) before the final read; the RV dependence w_init <- r_final orders them" << endl;
+  }
+  cout << "RV pond " << buf.name << ": accumulation pond, " << n_pixels << " pixels x "
+       << int_upper_bound(card(dom(pa.w_upd))) / n_pixels << " reduction steps; update "
+       << pa.w_upd << " / " << pa.r_upd << ", init " << pa.w_init << ", final " << pa.r_final << endl;
+  return true;
+}
+
+// garnet's RV pond (cgra/util_onyx.py build_pond_rv(dims=4)); override with
+// RV_POND_DIMS
+int rv_pond_dims() {
+  if (const char* m = std::getenv("RV_POND_DIMS")) {
+    return atoi(m);
+  }
+  // 2026-10: the pond's lake collateral carries its iteration-domain dims
+  if (auto pc = loaded_regfile_collateral()) {
+    return pc->iteration_level;
+  }
+  return 4;
+}
+
+// 2026-09-30: merge adjacent lake levels of RV ports until every port has at
+// most `max_levels` (hardware iteration-domain dimensionality). A pair (l,
+// l+1) merges only if it is exact: address (and filter) stride of l+1 equals
+// stride(l) * extent(l). dep_values levels are remapped; a constraint on an
+// absorbed level (l+1) makes the program unfittable (the RV program is then
+// dropped, i.e. static route, with a warning).
+Json rv_fit_levels(Json config_file, int max_levels, const string& what) {
+  if (!config_file.count("domain")) {
+    return config_file;
+  }
+  // levels referenced by constraints, per port
+  map<string, std::set<int> > used;
+  if (config_file.count("dep_values")) {
+    for (auto& it : config_file["dep_values"].items()) {
+      auto key = it.key();
+      auto pos = key.find("___DEPTO___");
+      if (pos == string::npos || !it.value().is_array() || it.value().size() < 2) {
+        continue;
+      }
+      used[key.substr(0, pos)].insert(it.value()[0].get<int>());
+      used[key.substr(pos + 11)].insert(it.value()[1].get<int>());
+    }
+  }
+  map<string, map<int, int> > remap;
+  for (auto& it : config_file["domain"].items()) {
+    string p = it.key();
+    auto ex = config_file["domain"][p]["extents"].get<vector<int> >();
+    int n = ex.size();
+    vector<int> newlvl(n);
+    for (int l = 0; l < n; l++) {
+      newlvl[l] = l;
+    }
+    if (n > max_levels) {
+      auto st = config_file["access_map"][p]["address_stride"].get<vector<int> >();
+      bool has_f = config_file.count("filter") && config_file["filter"].count(p);
+      vector<int> fs = has_f ? config_file["filter"][p]["stride"].get<vector<int> >() : vector<int>(n, 0);
+      bool has_s = config_file.count("rv_sched") && config_file["rv_sched"].count(p);
+      vector<int> ss = has_s ? config_file["rv_sched"][p]["stride"].get<vector<int> >() : vector<int>(n, 0);
+      // current levels as groups of original levels
+      vector<vector<int> > groups;
+      vector<int> gex, gst, gfs, gss;
+      for (int l = 0; l < n; l++) {
+        groups.push_back({l});
+        gex.push_back(ex[l]);
+        gst.push_back(st[l]);
+        gfs.push_back(fs[l]);
+        gss.push_back(ss[l]);
+      }
+      while ((int) groups.size() > max_levels) {
+        int pick_g = -1;
+        for (int g = 0; g + 1 < (int) groups.size(); g++) {
+          bool exact = gst[g + 1] == gst[g] * gex[g] && gfs[g + 1] == gfs[g] * gex[g];
+          bool upper_used = false;
+          for (int l : groups[g + 1]) {
+            upper_used |= used[p].count(l) > 0;
+          }
+          if (exact && !upper_used) {
+            pick_g = g;
+            break;
+          }
+        }
+        if (pick_g < 0) {
+          cout << "RV fit WARNING " << what << " " << p << ": " << n << " levels do not fit " << max_levels
+               << "; no RV program" << endl;
+          for (auto k : {"dep_values", "domain", "access_map", "filter", "rv_sched"}) {
+            config_file.erase(k);
+          }
+          return config_file;
+        }
+        if (gss[pick_g + 1] != gss[pick_g] * gex[pick_g]) {
+          cout << "RV fit WARNING " << p << ": schedule not linear across merged levels (rv_sched approximate)" << endl;
+        }
+        groups[pick_g].insert(groups[pick_g].end(), groups[pick_g + 1].begin(), groups[pick_g + 1].end());
+        gex[pick_g] *= gex[pick_g + 1];
+        groups.erase(groups.begin() + pick_g + 1);
+        gex.erase(gex.begin() + pick_g + 1);
+        gst.erase(gst.begin() + pick_g + 1);
+        gfs.erase(gfs.begin() + pick_g + 1);
+        gss.erase(gss.begin() + pick_g + 1);
+      }
+      for (int g = 0; g < (int) groups.size(); g++) {
+        for (int l : groups[g]) {
+          newlvl[l] = g;
+        }
+      }
+      int m = groups.size();
+      config_file["domain"][p]["extents"] = gex;
+      config_file["domain"][p]["dimensionality"] = {m};
+      config_file["access_map"][p]["address_stride"] = gst;
+      config_file["access_map"][p]["dimensionality"] = {m};
+      if (has_f) {
+        config_file["filter"][p]["stride"] = gfs;
+      }
+      if (has_s) {
+        config_file["rv_sched"][p]["stride"] = gss;
+      }
+      cout << "RV fit " << what << " " << p << ": " << n << " -> " << m << " levels " << config_file["domain"][p] << endl;
+    }
+    for (int l = 0; l < n; l++) {
+      remap[p][l] = newlvl[l];
+    }
+  }
+  if (config_file.count("dep_values")) {
+    for (auto& it : config_file["dep_values"].items()) {
+      auto key = it.key();
+      auto pos = key.find("___DEPTO___");
+      if (pos == string::npos || !it.value().is_array() || it.value().size() < 2) {
+        continue;
+      }
+      string a = key.substr(0, pos), b = key.substr(pos + 11);
+      auto v = it.value();
+      v[0] = remap[a].count(v[0].get<int>()) ? remap[a][v[0].get<int>()] : v[0].get<int>();
+      v[1] = remap[b].count(v[1].get<int>()) ? remap[b][v[1].get<int>()] : v[1].get<int>();
+      config_file["dep_values"][key] = v;
+    }
+  }
+  return config_file;
+}
+
+Json UBuffer::add_rv_pond_info_to_json(Json config_file, UBuffer& target_buf) {
+  RVPondAccum pa;
+  if (!rv_pond_accumulation(target_buf, pa)) {
+    cout << "RV pond WARNING " << target_buf.name << ": no RV program (static pond configuration)" << endl;
+    return config_file;
+  }
+  int max_extent = rv_pond_max_extent();
+  int dp = pa.n_pix;
+  auto pix_ex = extents(target_buf.domain.at(pa.w_init));
+  int n_pixels = 1;
+  for (int l = 1; l <= dp; l++) {
+    n_pixels *= pix_ex.at(l);
+  }
+  bool merge_pix = n_pixels <= max_extent;
+
+  // lake levels (innermost first) of port p: [reduction,] pixel level(s)
+  auto emit = [&](const string& p, bool upd) {
+    auto d = target_buf.domain.at(p);
+    auto ex = extents(d);
+    auto mn = mins(d);
+    auto a = get_aff(to_map(target_buf.schedule.at(p)));
+    int nd = ::num_dims(d) - 1;
+    vector<int> lex, lst;
+    // isl dims [lo, hi] as one level: extent product, stride of the innermost
+    auto merged = [&](int lo, int hi) {
+      int e = 1;
+      for (int l = lo; l <= hi; l++) {
+        e *= ex.at(l);
+      }
+      for (int l = lo; l < hi; l++) {
+        if (int_coeff(a, l) != int_coeff(a, l + 1) * ex.at(l + 1)) {
+          cout << "RV pond WARNING " << p << ": schedule not linear across dim " << l
+               << " (rv_sched is approximate)" << endl;
+        }
+      }
+      lex.push_back(e);
+      lst.push_back(int_coeff(a, hi));
+    };
+    if (upd) {
+      merged(dp + 1, nd);
+    }
+    if (merge_pix) {
+      merged(1, dp);
+    } else {
+      for (int l = dp; l >= 1; l--) {
+        if (ex.at(l) > 1) {
+          merged(l, l);
+        }
+      }
+    }
+    int off = int_const_coeff(a);
+    for (int l = 1; l <= nd; l++) {
+      off += int_coeff(a, l) * mn.at(l);
+    }
+
+    int n = lex.size();
+    config_file["domain"][p]["dimensionality"] = {n};
+    config_file["domain"][p]["extents"] = lex;
+    config_file["access_map"][p]["dimensionality"] = {n};
+    config_file["access_map"][p]["address_offset"] = {0};
+    config_file["access_map"][p]["address_stride"] = vector<int>(n, 0);
+    config_file["rv_sched"][p]["offset"] = {off};
+    config_file["rv_sched"][p]["stride"] = lst;
+    cout << "RV pond " << p << ": extents " << config_file["domain"][p]["extents"]
+         << ", schedule " << config_file["rv_sched"][p] << endl;
+  };
+  emit(pa.w_upd, true);
+  emit(pa.r_upd, true);
+  emit(pa.w_init, false);
+  emit(pa.r_final, false);
+
+  auto dep = [&](const string& p0, const string& p1, vector<int> v) {
+    config_file["dep_values"][p0 + "___DEPTO___" + p1] = v;
+  };
+  dep(pa.r_upd, pa.w_upd, {0, 0, -1});
+  dep(pa.r_final, pa.w_upd, {0, 1, 0});
+  dep(pa.r_upd, pa.w_init, {1, 0, 0});
+  dep(pa.w_init, pa.r_final, {0, 0, 1});
+  return config_file;
+}
+
+Json UBuffer::add_rv_info_to_json(Json config_file, UBuffer& target_buf, int fetch_width) {
   cout << "Adding rv info to json for buffer " << target_buf.name << endl;
   // config_file["rv"] = "GOTIT";
 
@@ -4567,24 +5015,222 @@ Json UBuffer::add_rv_info_to_json(Json config_file, UBuffer& target_buf) {
   }
 
   // unvectorized access map
+  // 2026-09-29: get_aff() keeps only output dim 0, so a bank whose address
+  // range is still multi-dimensional (banks without the shift-register
+  // optimization, e.g. resnet's input/kernel/accumulator banks; SR banks are
+  // linearized in generate_ubuffer) emitted the ROW index as the address.
+  // Linearize like the static path (linear_address_map_lake: rows padded to
+  // fetch_width) and fold the domain mins into the offset (lake iteration
+  // counters start at 0).
+  isl_map* rv_linearize = nullptr;
+  if (!target_buf.access_map.empty()) {
+    // (not global_range(): the lowered bank copy has no isl ctx member set)
+    uset* granges = nullptr;
+    for (auto am : target_buf.access_map) {
+      granges = granges == nullptr ? range(am.second) : unn(granges, range(am.second));
+    }
+    if (isl_union_set_n_set(granges) == 1) {
+      auto grange = to_set(granges);
+      if (::num_dims(grange) > 1) {
+        rv_linearize = linear_address_map_lake(grange, fetch_width);
+        cout << "RV linearize " << target_buf.name << ": " << str(rv_linearize) << endl;
+      }
+    } else {
+      cout << "RV linearize " << target_buf.name << ": skipped, address range spans "
+           << isl_union_set_n_set(granges) << " spaces" << endl;
+    }
+  }
   for(auto it: target_buf.access_map) {
     auto buff_domain = target_buf.domain.at(it.first);
     auto num_dims_aff = ::num_dims(buff_domain) - 1;
-    auto buf_access_aff = ::get_aff(it.second);
+    auto acc = it.second;
+    if (empty(acc)) {
+      cout << "RV access map WARNING " << it.first << ": empty access map, emitting address 0" << endl;
+      config_file["access_map"][it.first]["dimensionality"] = {num_dims_aff};
+      config_file["access_map"][it.first]["address_offset"] = {0};
+      config_file["access_map"][it.first]["address_stride"] = vector<int>(num_dims_aff, 0);
+      continue;
+    }
+    if (rv_linearize != nullptr) {
+      acc = to_umap(dot(to_map(acc), rv_linearize));
+    }
+    auto buf_access_aff = ::get_aff(acc);
+    int addr_offset = int_const_coeff(buf_access_aff);
+    if (rv_linearize != nullptr) {
+      auto dmins = mins(buff_domain);
+      for (int i = 1; i <= num_dims_aff; i++) {
+        addr_offset += int_coeff(buf_access_aff, i) * dmins.at(i);
+      }
+    }
     config_file["access_map"][it.first]["dimensionality"] = {num_dims_aff};
     config_file["access_map"][it.first]["address_stride"] = {};
-    config_file["access_map"][it.first]["address_offset"] = {int_const_coeff(buf_access_aff)};
+    config_file["access_map"][it.first]["address_offset"] = {addr_offset};
     for(int i = 0; i < num_dims_aff; i++){
       int idx = num_dims_aff - i;
       config_file["access_map"][it.first]["address_stride"].push_back(int_coeff(buf_access_aff, idx));
     }
   }
 
+  // Static schedule of each port in lake levels, time = offset + sum(stride *
+  // counter). Verification only (lake ignores it); emitted for reuse buffers.
+  if (!target_buf.rv_fallback_deps.empty() || rv_linearize != nullptr) {
+    for (auto it : target_buf.schedule) {
+      auto p = it.first;
+      if (!target_buf.domain.count(p)) {
+        continue;
+      }
+      auto dom = target_buf.domain.at(p);
+      auto num_dims_aff = ::num_dims(dom) - 1;
+      if (empty(it.second)) {
+        cout << "RV schedule WARNING " << p << ": empty schedule" << endl;
+        continue;
+      }
+      auto saff = ::get_aff(it.second);
+      auto dmins = mins(dom);
+      int s_offset = int_const_coeff(saff);
+      for (int i = 1; i <= num_dims_aff; i++) {
+        s_offset += int_coeff(saff, i) * dmins.at(i);
+      }
+      config_file["rv_sched"][p]["offset"] = {s_offset};
+      config_file["rv_sched"][p]["stride"] = {};
+      for (int i = 0; i < num_dims_aff; i++) {
+        config_file["rv_sched"][p]["stride"].push_back(int_coeff(saff, num_dims_aff - i));
+      }
+    }
+  }
+
+  // 2026-09-29: a bank fed by a broadcast stream (one writer op feeding every
+  // bank, e.g. resnet's input channels interleaved on one GLB stream) only
+  // stores its subset. Static schedules sample their cycles; a ready/valid
+  // lake port needs its filter: accept transaction t of the stream iff
+  // t = offset + sum(stride * counter), t = the item's position in the
+  // stream = its lexicographic rank in the full writer op's domain. A bank
+  // iteration maps to its full-op iteration through the (injective) static
+  // schedules.
+  for (auto it : target_buf.rv_writer_stream) {
+    auto p = it.first;
+    if (!target_buf.domain.count(p) || !target_buf.schedule.count(p) ||
+        !target_buf.rv_writer_full_sched.count(p) || !target_buf.rv_writer_full_rank.count(p)) {
+      continue;
+    }
+    int card_full = it.second.at(0);
+    int rank_first = it.second.at(1);
+    auto bank_dom = target_buf.domain.at(p);
+    int card_bank = int_upper_bound(card(bank_dom));
+    if (card_bank >= card_full) {
+      continue;
+    }
+    auto bank_to_full = dot(its(target_buf.schedule.at(p), to_uset(cpy(bank_dom))),
+                            inv(target_buf.rv_writer_full_sched.at(p)));
+    auto rank_map = dot(bank_to_full, target_buf.rv_writer_full_rank.at(p));
+    if (empty(rank_map)) {
+      // e.g. an accumulation register's rewritten ports live in another space
+      cout << "RV filter WARNING " << p << ": " << card_bank << " of " << card_full
+           << " stream items but the bank schedule does not map onto the stream; no filter emitted" << endl;
+      continue;
+    }
+    auto rank_aff = ::get_aff(rank_map);
+    auto num_dims_aff = ::num_dims(bank_dom) - 1;
+    auto dmins = mins(bank_dom);
+    int f_offset = int_const_coeff(rank_aff) - rank_first;
+    for (int i = 1; i <= num_dims_aff; i++) {
+      f_offset += int_coeff(rank_aff, i) * dmins.at(i);
+    }
+    config_file["filter"][p]["offset"] = {f_offset};
+    config_file["filter"][p]["stride"] = {};
+    for (int i = 0; i < num_dims_aff; i++) {
+      config_file["filter"][p]["stride"].push_back(int_coeff(rank_aff, num_dims_aff - i));
+    }
+    cout << "RV filter " << p << ": " << card_bank << " of " << card_full
+         << " stream items, " << config_file["filter"][p] << endl;
+  }
+
+  // Coalesce the reduction loops of read-modify-write ports (see
+  // classify_rv_fallback) so one lake level carries the sweep index. Exact:
+  // the merged loops have address (and filter) stride 0.
+  for (auto m : target_buf.rv_merge_levels) {
+    auto p = m.first;
+    int lo = m.second.first;
+    int hi = m.second.second;
+    if (hi <= lo || !config_file["domain"].count(p) || !config_file["access_map"].count(p)) {
+      continue;
+    }
+    auto ex = config_file["domain"][p]["extents"].get<vector<int> >();
+    auto st = config_file["access_map"][p]["address_stride"].get<vector<int> >();
+    vector<int> nex, nst;
+    for (int l = 0; l < (int) ex.size(); l++) {
+      if (l <= lo || l > hi) {
+        nex.push_back(ex.at(l));
+        nst.push_back(st.at(l));
+      } else {
+        nex.back() *= ex.at(l);
+      }
+    }
+    config_file["domain"][p]["extents"] = nex;
+    config_file["domain"][p]["dimensionality"] = {(int) nex.size()};
+    config_file["access_map"][p]["address_stride"] = nst;
+    config_file["access_map"][p]["dimensionality"] = {(int) nst.size()};
+    if (config_file["rv_sched"].count(p)) {
+      auto ss = config_file["rv_sched"][p]["stride"].get<vector<int> >();
+      vector<int> nss;
+      for (int l = 0; l < (int) ss.size(); l++) {
+        if (l <= lo || l > hi) {
+          nss.push_back(ss.at(l));
+        } else if (ss.at(l) != ss.at(l - 1) * ex.at(l - 1)) {
+          cout << "RV coalesce WARNING " << p << ": schedule not linear across level " << l << endl;
+        }
+      }
+      config_file["rv_sched"][p]["stride"] = nss;
+    }
+    cout << "RV coalesce " << p << ": levels " << lo << ".." << hi << " -> " << config_file["domain"][p] << endl;
+  }
+
+  // A 0-dimensional port (single access, e.g. an accumulator's init write or
+  // final read) becomes one level of extent 1: lake iteration domains need a
+  // level to count.
+  for (auto it : target_buf.domain) {
+    auto p = it.first;
+    if (::num_dims(it.second) != 1 || !config_file["domain"].count(p)) {
+      continue;
+    }
+    config_file["domain"][p]["extents"] = {1};
+    config_file["domain"][p]["dimensionality"] = {1};
+    if (config_file["access_map"].count(p)) {
+      config_file["access_map"][p]["address_stride"] = {0};
+      config_file["access_map"][p]["dimensionality"] = {1};
+    }
+    if (config_file["rv_sched"].count(p)) {
+      config_file["rv_sched"][p]["stride"] = {0};
+    }
+  }
+
   // dep values
+  auto rv_top_level = [&](const string& p) {
+    int top = ::num_dims(target_buf.domain.at(p)) - 2;
+    if (target_buf.rv_merge_levels.count(p)) {
+      top -= target_buf.rv_merge_levels.at(p).second - target_buf.rv_merge_levels.at(p).first;
+    }
+    return max(top, 0);
+  };
   for(auto it: target_buf.dependencies) {
     auto p0 = it.first.first;
     auto p1 = it.first.second;
     auto dep_name = p0 + "___DEPTO___" + p1;
+    if (target_buf.rv_omit_deps.count(it.first)) {
+      continue;
+    }
+    if (target_buf.rv_fallback_deps.count(it.first)) {
+      auto fb = target_buf.rv_fallback_deps.at(it.first);
+      if (fb.at(0) == RV_DEP_BARRIER) {
+        // [this level, on level, scalar]: this + scalar < on never holds for
+        // in-range counters, so p0 steps only once p1 has finished
+        config_file["dep_values"][dep_name] = {rv_top_level(p0), rv_top_level(p1), 16383};
+      } else {
+        // p0 sweep s may run once p1 is in sweep s - d + 1 (finished s - d)
+        config_file["dep_values"][dep_name] = {fb.at(1), fb.at(1), -fb.at(2)};
+      }
+      continue;
+    }
     auto dep_vec = it.second;
     config_file["dep_values"][dep_name] = {};
     for(auto vec_elem: dep_vec){
@@ -4626,7 +5272,8 @@ CoreIR::Instance* UBuffer::map_ubuffer_to_cgra(CodegenOptions& options, CoreIR::
     const char* dense_ready_valid = std::getenv("DENSE_READY_VALID");
     if (dense_ready_valid && dense_ready_valid[0] == '1') {
       cout << "Add rv information to buffer..." << endl;
-      config_file = add_rv_info_to_json(config_file, hw_impl.target_buf);
+      int rv_fw = options.mem_hierarchy.count("mem") ? options.mem_hierarchy.at("mem").fetch_width : 1;
+      config_file = add_rv_info_to_json(config_file, hw_impl.target_buf, rv_fw);
     }
     cout << "Generate lake tile instance...af" << endl;
     buf = generate_lake_tile_instance(def, options,
@@ -4637,6 +5284,16 @@ CoreIR::Instance* UBuffer::map_ubuffer_to_cgra(CodegenOptions& options, CoreIR::
 
   } else if (hw_impl.config_mode == "lake_dp") {
     config_file = generate_ubuf_args(options, target_buf, "mem");
+    // 2026-09-28: fetch_width==1 memories (lake_dp, e.g. lake build_spec_rv
+    // vec_width=1) never got the RV program: add_rv_info_to_json was only
+    // called for "lake". Without dep_values the lake bitstream path programs
+    // the tile with static schedules on a ready-valid spec.
+    const char* dense_ready_valid_dp = std::getenv("DENSE_READY_VALID");
+    if (dense_ready_valid_dp && dense_ready_valid_dp[0] == '1') {
+      cout << "Add rv information to buffer (lake_dp)..." << endl;
+      int rv_fw = options.mem_hierarchy.count("mem") ? options.mem_hierarchy.at("mem").fetch_width : 1;
+      config_file = add_rv_info_to_json(config_file, hw_impl.target_buf, rv_fw);
+    }
     bool has_stencil_valid = has_stencil_valid;
 
     //Change to lake generator
@@ -4649,6 +5306,23 @@ CoreIR::Instance* UBuffer::map_ubuffer_to_cgra(CodegenOptions& options, CoreIR::
     //        target_buf.num_in_ports(), target_buf.num_out_ports());
   } else if (hw_impl.config_mode == "pond") {
     config_file = generate_ubuf_args(options, target_buf, "regfile");
+    if (target_buf.rv_pond_accum) {
+      cout << "Add rv information to buffer (pond)..." << endl;
+      config_file = add_rv_pond_info_to_json(config_file, target_buf);
+    } else if (dense_rv_compile()) {
+      // 2026-09-30: any other pond (e.g. a small reuse buffer the capacity
+      // check put in the register-file level) gets the MEM-tile RV program on
+      // the pond's data ports, fitted to its iteration domains. The RV pond's
+      // second input is the dangling flush port: only one writer fits.
+      if (target_buf.num_in_ports() > 1) {
+        cout << "RV pond WARNING " << target_buf.name << ": " << target_buf.num_in_ports()
+             << " writers but an RV pond has one data input; no RV program" << endl;
+      } else {
+        cout << "Add rv information to buffer (pond, generic)..." << endl;
+        config_file = add_rv_info_to_json(config_file, target_buf, 1);
+        config_file = rv_fit_levels(config_file, rv_pond_dims(), target_buf.name);
+      }
+    }
     bool has_stencil_valid = false;
     buf = generate_pond_instance(def, options, ub_ins_name, "pond", has_stencil_valid,
             target_buf.num_in_ports(), target_buf.num_out_ports());
@@ -4973,6 +5647,14 @@ CoreIR::Instance* UBuffer::generate_accum_reg_instance(CodegenOptions& options, 
 void create_accumulation_register_and_rewrite_buf(CodegenOptions & options, UBuffer & buf, GarnetImpl& hw_impl) {
   //only evoke this opitimization for lake
   if (hw_impl.config_mode != "lake") {
+    return ;
+  }
+  // 2026-09-29: the accumulation register is a pond (generate_ubuf_args(...,
+  // "regfile")); without a regfile level (HL_TARGET without -enable_ponds)
+  // this threw mem_hierarchy.at("regfile"). Keep the accumulator in the MEM
+  // tile instead (a read-modify-write buffer).
+  if (!options.mem_hierarchy.count("regfile")) {
+    cout << "No regfile level: accumulation register for " << buf.name << " stays in the MEM tile" << endl;
     return ;
   }
 
@@ -13356,11 +14038,21 @@ void lower_to_garnet_implementation(CodegenOptions& options,
 
     //If this is memory do double buffer optimization
     //rewrite the ubuffer IR and change the cgpl control
-    isl_map* cgpl_schedule;
+    isl_map* cgpl_schedule = nullptr;
     bool decouple_ctrl = false;
     bool substract_glb_latency = false;
-    cgpl_ctrl_optimization(options, target_buf, CGRAImpl.config_mode,
-            cgpl_schedule, decouple_ctrl, substract_glb_latency);
+    // 2026-09-29: a ready-valid accumulation pond keeps its outer (pixel)
+    // loops and runs lake's accumulation program over them, instead of being
+    // restarted per pixel by a flush controller (see rv_pond_accumulation)
+    const char* dense_ready_valid = std::getenv("DENSE_READY_VALID");
+    if (dense_ready_valid && dense_ready_valid[0] == '1' && CGRAImpl.config_mode == "pond") {
+      RVPondAccum pa;
+      target_buf.rv_pond_accum = rv_pond_accumulation(target_buf, pa);
+    }
+    if (!target_buf.rv_pond_accum) {
+      cgpl_ctrl_optimization(options, target_buf, CGRAImpl.config_mode,
+              cgpl_schedule, decouple_ctrl, substract_glb_latency);
+    }
     CGRAImpl.decouple_ctrl = decouple_ctrl;
     CGRAImpl.substract_glb_latency = substract_glb_latency;
     CGRAImpl.cgpl_schedule = cgpl_schedule;

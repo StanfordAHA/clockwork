@@ -3550,7 +3550,12 @@ bool all_loop_nests_same_depth(prog& prg) {
 }
 
 bool is_perfect(op* loop, prog& prg) {
-  assert(loop->is_loop());
+  // 2026-09-30: a statement (non-loop child, e.g. a reduction's per-pixel
+  // init next to its update loop) is trivially perfect; loop_perfection asks
+  // this for every child and used to abort here.
+  if (!loop->is_loop()) {
+    return true;
+  }
   if (is_inner_loop(loop)) {
     return true;
   }
@@ -5026,6 +5031,18 @@ void add_epilogue_op(op* op_tbm, op* imperfect_child_lp, op* inner_most_cgpl_lp)
   op_tbm->attach_to(if_node);
 }
 
+static bool op_contains(op* root, op* target) {
+  if (root == target) {
+    return true;
+  }
+  for (auto c : root->children) {
+    if (op_contains(c, target)) {
+      return true;
+    }
+  }
+  return false;
+}
+
 void loop_perfection(op* target_lp, op* inner_most_cgpl_lp, prog& prg) {
   //pc id is the location of loop child that will subsume all the other children
   int pc_id = -1;
@@ -5038,7 +5055,22 @@ void loop_perfection(op* target_lp, op* inner_most_cgpl_lp, prog& prg) {
     }
     child_count ++;
   }
-  assert(pc_id != -1);
+  // 2026-09-30: the subsuming child is the one that holds the innermost
+  // coarse-grained loop; it can itself be perfect (e.g. a pixel loop whose
+  // only child is that loop, next to sibling statements). With none, there
+  // is nothing to move into: leave the loop as is.
+  if (pc_id == -1) {
+    for (int i = 0; i < (int) target_lp->children.size(); i++) {
+      if (op_contains(target_lp->children.at(i), inner_most_cgpl_lp)) {
+        pc_id = i;
+      }
+    }
+    if (pc_id == -1) {
+      cout << "loop_perfection: " << target_lp->name << " has no child holding "
+           << inner_most_cgpl_lp->name << "; left as is" << endl;
+      return;
+    }
+  }
   for (int i = pc_id-1; i >= 0; i --) {
     add_prelogue_op(target_lp->children.at(i), target_lp->children.at(pc_id), inner_most_cgpl_lp);
     //Move one loop inside need to decrease the index

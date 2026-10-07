@@ -1077,6 +1077,29 @@ class UBuffer {
     std::map<std::pair<string, string>, vector<int>> dependencies;
     std::map<std::pair<string, string>, string> dependencies_str;
 
+    // 2026-09-29 RV constraints for dependences that are not uniform
+    // translations (reuse buffers), set by populate_rv_deps and lowered to
+    // lake levels in add_rv_info_to_json:
+    //   rv_fallback_deps[(this, on)] = {RV_DEP_BARRIER, writer_last_time, reader_first_time}
+    //                                | {RV_DEP_SWEEP, merged_lake_level, distance}
+    //   rv_omit_deps: pairs that need no constraint at all
+    //   rv_war_empty: (writer, reader) pairs whose WAR relation is empty
+    //   rv_merge_levels[port] = lake levels [lo, hi] coalesced into one
+    //   rv_writer_stream[port] = {card, rank of first item} of the full
+    //     (pre-banking) writer op, i.e. the stream broadcast to every bank;
+    //     rv_writer_full_sched / rv_writer_full_rank: that op's schedule and
+    //     lexicographic rank (position in the stream) over its full domain
+    std::map<std::pair<string, string>, vector<int>> rv_fallback_deps;
+    std::set<std::pair<string, string>> rv_omit_deps;
+    std::set<std::pair<string, string>> rv_war_empty;
+    std::map<string, std::pair<int, int>> rv_merge_levels;
+    std::map<string, vector<int>> rv_writer_stream;
+    std::map<string, umap*> rv_writer_full_sched;
+    std::map<string, umap*> rv_writer_full_rank;
+    // Pond bank that runs lake's accumulation program over its whole loop
+    // nest (add_rv_pond_info_to_json); set by lower_to_garnet_implementation
+    bool rv_pond_accum = false;
+
     int coarse_grained_pipeline_loop_level;
 
     //This is used to retrive the flattened iteration domain
@@ -1160,7 +1183,8 @@ class UBuffer {
       return ret_;
     }
 
-    Json add_rv_info_to_json(Json config_file, UBuffer& target_buf);
+    Json add_rv_info_to_json(Json config_file, UBuffer& target_buf, int fetch_width = 1);
+    Json add_rv_pond_info_to_json(Json config_file, UBuffer& target_buf);
     // json add_rv_info_to_json(json config_file, UBuffer& target_buf);
 
     vector<std::string> tokenize_string(std::string str, std::string delimiter) {
@@ -1241,6 +1265,10 @@ class UBuffer {
 
     void populate_rv_deps(bool lowered){
       cout << "POPULATE_RV_DEPS" << endl;
+      if (rv_pond_accum) {
+        cout << "Buffer " << name << ": accumulation pond, RV program emitted by add_rv_pond_info_to_json" << endl;
+        return;
+      }
       // Here, can we calculate the dependency live?
       for(auto outpt__: get_out_ports()){
 
@@ -1248,16 +1276,44 @@ class UBuffer {
 
         for(auto inpt__: get_in_ports()){
           cout << "Comparing against input port: " << inpt__ << endl;
+          // 2026-09-28: fail with the missing port's name instead of a bare
+          // map::at, and tolerate ports that lack a non-simplified access map
+          // (e.g. ports rewritten by the accumulation-register optimization via
+          // replace_pt, as in matmul with ponds): use the simplified maps for
+          // BOTH ports of the pair so writer and reader stay in the same address
+          // space (the dependency relation only needs a common space).
+          for (auto pn : {inpt__, outpt__}) {
+            if (!access_map.count(pn) || !schedule.count(pn) || !domain.count(pn)) {
+              throw std::runtime_error("populate_rv_deps: buffer " + name + " port " + pn +
+                                       " missing access_map/schedule/domain");
+            }
+          }
+          // 2026-09-29: ... and only when the saved non-simplified map is on
+          // the port's current domain space: lowering can project fixed dims
+          // out of a bank port's domain/schedule after the copy was taken
+          // (resnet kernel banks: map on op[root,y,x,w=0,z=0], domain on
+          // op[root,y,x]) and the RAW relation then comes out empty.
+          auto non_simplified_ok = [&](const string& pn) {
+            return access_map_non_simplified.count(pn) &&
+                num_in_dims(to_map(access_map_non_simplified.at(pn))) == ::num_dims(domain.at(pn));
+          };
+          bool use_non_simplified = lowered &&
+              non_simplified_ok(inpt__) &&
+              non_simplified_ok(outpt__);
+          if (lowered && !use_non_simplified) {
+            cout << "POPULATE_RV_DEPS: no non-simplified access map for pair (" << outpt__
+                 << ", " << inpt__ << "); using simplified maps" << endl;
+          }
           // Get the maps for each
           auto writer_access_map = access_map.at(inpt__);
-          if(lowered){
+          if(use_non_simplified){
             writer_access_map = access_map_non_simplified.at(inpt__);
           }
           auto writer_sched_map = schedule.at(inpt__);
           auto writer_domain = domain.at(inpt__);
 
           auto reader_access_map = access_map.at(outpt__);
-          if(lowered){
+          if(use_non_simplified){
             reader_access_map = access_map_non_simplified.at(outpt__);
           }
           auto reader_sched_map = schedule.at(outpt__);
@@ -1299,6 +1355,28 @@ class UBuffer {
           // Add WAR dep: WR dep on RD -> WAR str
           dependencies_str.insert({{inpt__, outpt__}, str(war_validity)});
 
+          // 2026-09-29: the string extraction below only understands uniform
+          // translations (same loop depth, every read has exactly one source
+          // write at a constant iteration distance). Reuse buffers (re-reads,
+          // read-modify-write accumulators, different loop nests) used to get
+          // a null dep (lake asserts) or a per-dimension offset vector that
+          // lake misreads as [level, level]; classify those instead.
+          bool raw_empty = empty(raw_validity);
+          bool war_empty = empty(war_validity);
+          if (war_empty) {
+            rv_war_empty.insert({inpt__, outpt__});
+          }
+          bool uniform = !raw_empty &&
+              ::num_dims(reader_domain) == ::num_dims(writer_domain) &&
+              ::num_dims(reader_domain) > 1 &&
+              isl_union_map_is_single_valued(inv(raw_validity)) == isl_bool_true;
+          if (!uniform) {
+            classify_rv_fallback(outpt__, inpt__, raw_validity, raw_empty, war_empty,
+                                 reader_domain, reader_sched_map, reader_access_map,
+                                 writer_domain, writer_sched_map, writer_access_map);
+            continue;
+          }
+
           // Do some string analysis to calculate the scalar deps
           auto raw_string = str(raw_validity);
           auto war_string = str(war_validity);
@@ -1335,6 +1413,147 @@ class UBuffer {
 
       }
 
+      // In a buffer with any fallback (reuse) dependence, a writer whose WAR
+      // relation is empty never overwrites data a reader still needs (single
+      // pass), so it needs no WAR constraint - and lake's null-WAR placeholder
+      // (writer at most 8 rows ahead) deadlocks against a reader that waits
+      // for that writer to finish.
+      if (!rv_fallback_deps.empty()) {
+        for (auto p : rv_war_empty) {
+          rv_omit_deps.insert(p);
+        }
+      }
+
+    }
+
+    enum { RV_DEP_BARRIER = 1, RV_DEP_SWEEP = 2 };
+
+    // RV constraint for a reader/writer pair whose dependence is not a uniform
+    // translation. Lake can only compare one loop level of each port (plus a
+    // one-level wrap fixup), and a comparison is forced true once either port
+    // has finished, so:
+    //  - read-modify-write (same statement and address map, e.g. an
+    //    accumulator swept once per reduction step): the RAW distance to the
+    //    last earlier write of the same address is constant in the coalesced
+    //    zero-address-stride loops -> SWEEP: reader sweep s waits until the
+    //    writer has finished sweep s - d. The WAR is implied by dataflow (the
+    //    write of iteration i is computed from the read of iteration i).
+    //  - otherwise -> BARRIER: the reader waits until the writer has finished.
+    //    Deadlock-free when the static schedule does all writes before the
+    //    first dependent read (checked and reported).
+    void classify_rv_fallback(const string& rd, const string& wr, umap* raw, bool raw_empty, bool war_empty,
+                              isl_set* rd_dom, umap* rd_sched, umap* rd_acc,
+                              isl_set* wr_dom, umap* wr_sched, umap* wr_acc) {
+      // add_rv_info_to_json walks `dependencies`, so list both directions
+      dependencies[{rd, wr}] = {};
+      dependencies[{wr, rd}] = {};
+      if (war_empty) {
+        rv_omit_deps.insert({wr, rd});
+      }
+      if (raw_empty) {
+        cout << "RV_FALLBACK " << rd << " <- " << wr << ": no RAW, no constraint" << endl;
+        rv_omit_deps.insert({rd, wr});
+        return;
+      }
+
+      bool rmw = ::name(rd_dom) == ::name(wr_dom) &&
+          isl_union_map_is_equal(rd_acc, wr_acc) == isl_bool_true;
+      if (rmw) {
+        rv_omit_deps.insert({wr, rd});
+        // Recompute the RAW relation with the two port schedules kept apart:
+        // both ports belong to ONE statement, so the pair's union schedule
+        // gives each iteration two times and `raw` has every iteration
+        // depending on itself.
+        auto rmw_raw = its(dot(wr_acc, inv(rd_acc)), lex_lt(wr_sched, rd_sched));
+        auto last_write = isl_union_map_lexmax(inv(rmw_raw));
+        auto dist_set = isl_union_map_deltas(cpy(last_write));
+        cout << "RV_FALLBACK " << rd << " <- " << wr << ": read-modify-write distances " << str(dist_set) << endl;
+        auto dist_pts = get_points(to_set(dist_set));
+        auto ext = extents(rd_dom);
+        int nd = ::num_dims(rd_dom);
+        int a = nd;
+        int b = -1;
+        vector<vector<int> > dvs;
+        for (auto pt : dist_pts) {
+          vector<int> dv;
+          for (int i = 0; i < nd; i++) {
+            // deltas of (reader -> writer) are writer - reader; want reader - writer
+            int c = -to_int(isl_point_get_coordinate_val(pt, isl_dim_set, i));
+            dv.push_back(c);
+            if (c != 0) {
+              a = min(a, i);
+              b = max(b, i);
+            }
+          }
+          dvs.push_back(dv);
+        }
+        // dim 0 is root; the coalesced dims must not move the address
+        bool ok = a >= 1 && b >= a;
+        auto acc_ma = get_multi_aff(rd_acc);
+        for (int i = a; ok && i <= b; i++) {
+          for (int o = 0; o < (int) isl_multi_aff_dim(acc_ma, isl_dim_out); o++) {
+            if (int_coeff(isl_multi_aff_get_aff(acc_ma, o), i) != 0) {
+              ok = false;
+            }
+          }
+        }
+        int d = -1;
+        for (auto& dv : dvs) {
+          if (!ok) {
+            break;
+          }
+          int m = 0;
+          for (int i = a; i <= b; i++) {
+            m = m * ext.at(i) + dv.at(i);
+          }
+          if (d == -1) {
+            d = m;
+          } else if (m != d) {
+            ok = false;
+          }
+        }
+        if (ok && d >= 1) {
+          // If every loop inside the sweep also has address stride 0, the same
+          // address is rewritten back-to-back: a wide-fetch (opt_rv) MEM write
+          // only commits a word once the writer moves to another word, so the
+          // next read would see the stale value. Needs a pond, or the
+          // reduction loops outermost (as in apps/resnet).
+          bool inner_moves = false;
+          for (int i = b + 1; i < nd; i++) {
+            for (int o = 0; o < (int) isl_multi_aff_dim(acc_ma, isl_dim_out); o++) {
+              if (int_coeff(isl_multi_aff_get_aff(acc_ma, o), i) != 0) {
+                inner_moves = true;
+              }
+            }
+          }
+          if (!inner_moves) {
+            cout << "RV_FALLBACK WARNING " << rd << " <- " << wr
+                 << ": read-modify-write of the same address back-to-back; a wide-fetch MEM cannot serve it"
+                 << " (use a pond or put the reduction loops outermost)" << endl;
+          }
+          int lo = nd - 1 - b;
+          int hi = nd - 1 - a;
+          rv_merge_levels[rd] = {lo, hi};
+          rv_merge_levels[wr] = {lo, hi};
+          rv_fallback_deps[{rd, wr}] = {RV_DEP_SWEEP, lo, d};
+          cout << "RV_FALLBACK " << rd << " <- " << wr << ": SWEEP at lake level " << lo
+               << " (coalesced " << lo << ".." << hi << "), distance " << d << endl;
+        } else {
+          cout << "RV_FALLBACK WARNING " << rd << " <- " << wr
+               << ": read-modify-write is not a constant-distance sweep; no RAW constraint (dataflow only)" << endl;
+          rv_omit_deps.insert({rd, wr});
+        }
+        return;
+      }
+
+      auto w_times = to_set(range(its(wr_sched, to_uset(wr_dom))));
+      auto r_times = to_set(range(its(rd_sched, range(raw))));
+      int w_last = to_int(lexmaxval(w_times));
+      int r_first = to_int(lexminval(r_times));
+      rv_fallback_deps[{rd, wr}] = {RV_DEP_BARRIER, w_last, r_first};
+      cout << "RV_FALLBACK " << rd << " <- " << wr << ": BARRIER (writer last " << w_last
+           << ", first dependent read " << r_first << ")"
+           << (w_last < r_first ? "" : " WARNING: overlaps in the static schedule") << endl;
     }
 
     int logical_dimension();
@@ -1936,9 +2155,15 @@ class UBuffer {
     bool can_be_broadcast(const std::string& pt0, const std::string& pt1) const {
       auto acc_0 = to_map(access_map.at(pt0));
       auto acc_1 = to_map(access_map.at(pt1));
+      bool acc_equal = equal_regardless_of_domain(acc_0, acc_1);
+      // Short-circuit: comparing the schedule ranges can blow up in isl
+      // (fetch2 schedules of resnet_pond's unrolled input taps), and it is
+      // only needed when the addresses match.
+      if (!acc_equal) {
+        return false;
+      }
       auto sched_0 = range(schedule.at(pt0));
       auto sched_1 = range(schedule.at(pt1));
-      bool acc_equal = equal_regardless_of_domain(acc_0, acc_1);
       bool sched_equal = equal(sched_0, sched_1);
       return acc_equal && sched_equal;
     }

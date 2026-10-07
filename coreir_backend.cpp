@@ -2902,6 +2902,26 @@ CoreIR::Module*  generate_coreir_without_ctrl(CodegenOptions& options,
           }
         }
 
+        // 2026-09-29: record each bank writer's FULL (pre-banking) stream so
+        // add_rv_info_to_json can emit a lake filter for banks that keep only
+        // a subset of a broadcast stream.
+        for (auto l : lowering_information) {
+          auto& lowered_buf = impl.lowering_info.at(l.first).target_buf;
+          for (auto inpt : lowered_buf.get_in_ports()) {
+            if (!buf.second.domain.count(inpt) || !buf.second.schedule.count(inpt)) {
+              continue;
+            }
+            auto full_dom = buf.second.domain.at(inpt);
+            // stream position = lexicographic rank in the op's (box) domain
+            auto full_rank = to_umap(linear_address_map_lake(cpy(full_dom), 1));
+            auto ranks = to_set(range(its(full_rank, to_uset(cpy(full_dom)))));
+            lowered_buf.rv_writer_stream[inpt] = {int_upper_bound(card(full_dom)),
+                                                  to_int(lexminval(ranks))};
+            lowered_buf.rv_writer_full_sched[inpt] = its(buf.second.schedule.at(inpt), to_uset(cpy(full_dom)));
+            lowered_buf.rv_writer_full_rank[inpt] = full_rank;
+          }
+        }
+
         // TODO: Check here if the lowered information has infomation on the changed buffer
         cout << "GETTING INFO FOR FILTERING: " << buf.first << endl;
 
@@ -3157,6 +3177,67 @@ CoreIR::Module*  generate_coreir_without_ctrl(CodegenOptions& options,
                 // If the port isn't in either input, need to use the saved name
                 if(!(in_abstract_inputs || in_impl_inputs || in_saved)){
                   writer_name_use = write_name_save;
+
+                  // 2026-09-28: write_name_save is only set once an earlier
+                  // iteration hit a writer in shift_registered_outputs. When no
+                  // such writer precedes this port (e.g. resnet's input buffer has
+                  // no SRO ports at all, only `conv_stencil_4_22` = delay-0 copy of
+                  // the ordinary read port `conv_stencil_3_32`), it is still "" and
+                  // use_domains_save.at("") below threw std::out_of_range. Resolve
+                  // the writer properly instead: follow output->output chains to
+                  // their root port and record the root's own domain/access map
+                  // (abstract buffer first, lowered bank as a fallback). A delay-0
+                  // siphon carries exactly the root's data. Only reached where the
+                  // old fallback was empty, so every previously-working path is
+                  // unchanged.
+                  if (writer_name_use.empty()) {
+                    // shift_registered_outputs_to_outputs is a vector of
+                    // (port, (writer_port, delay)) pairs.
+                    auto sroo_writer_of = [&](const std::string& p, std::string& w) {
+                      for (auto& e : impl.shift_registered_outputs_to_outputs) {
+                        if (e.first == p) { w = e.second.first; return true; }
+                      }
+                      return false;
+                    };
+                    std::string root = writer_name;
+                    std::string next;
+                    std::set<std::string> seen;
+                    while (use_domains_save.count(root) == 0 &&
+                           sroo_writer_of(root, next) &&
+                           seen.insert(root).second) {
+                      root = next;
+                    }
+                    // Prefer the root port's *abstract* (simplify_address_space'd)
+                    // domain/access map -- the same source the SRO loop uses for
+                    // writers siphoned off the input -- so it composes with this
+                    // port's abstract access map (buf_access_map). The lowered
+                    // bank's non-simplified map lives in a different address space
+                    // and projects to {} (then to_set({}) asserts).
+                    if (use_domains_save.count(root) == 0 && buf.second.access_map.count(root) > 0) {
+                      use_domains_save.insert({root, cpy(buf.second.domain.at(root))});
+                      use_access_maps_save.insert({root, cpy(buf.second.access_map.at(root))});
+                    }
+                    if (use_domains_save.count(root) == 0) {
+                      for (auto& lb : impl.lowering_info) {
+                        auto& lb_buf = lb.second.target_buf;
+                        if (lb_buf.access_map.count(root) == 0) continue;
+                        auto root_map = to_map(cpy(lb_buf.access_map_non_simplified.at(root)));
+                        if (root_map == nullptr) {
+                          cout << "Converted map is null (root " << root << ")" << endl;
+                          assert(false);
+                        }
+                        use_domains_save.insert({root, cpy(lb_buf.domain.at(root))});
+                        use_access_maps_save.insert({root, to_umap(set_range_name(root_map, buf.second.name))});
+                        break;
+                      }
+                    }
+                    if (use_domains_save.count(root) == 0) {
+                      throw std::runtime_error("RV filtering info: cannot resolve writer '" + writer_name +
+                                               "' of shift-registered output '" + port_name + "' in buffer " + buf.first);
+                    }
+                    cout << "Resolved writer " << writer_name << " via root port " << root << endl;
+                    writer_name_use = root;
+                  }
                 }
 
                 cout << "Using this writer name... " << writer_name_use << endl;
@@ -3203,7 +3284,12 @@ CoreIR::Module*  generate_coreir_without_ctrl(CodegenOptions& options,
               // Check if empty...
               auto ss = get_sets(diff_domains);
               if(ss.size() == 0){
-                impl.lowering_info.at(l.first).target_buf.domain_difference[port_name] = nullptr;
+                // Empty difference (e.g. a delay-0 copy of another output):
+                // leave domain_difference unset, exactly like the SRO loop above.
+                // A nullptr entry here crashes add_rv_info_to_json, which
+                // str()/get_points() every domain_difference entry.
+                cout << "Setting to nullptr... (3)" << endl;
+                // impl.lowering_info.at(l.first).target_buf.domain_difference[port_name] = nullptr;
               }
               else{
                 impl.lowering_info.at(l.first).target_buf.domain_difference[port_name] = to_set(cpy(diff_domains));
@@ -3363,6 +3449,14 @@ CoreIR::Module*  generate_coreir_without_ctrl(CodegenOptions& options,
             auto ubuf_map = in_ports_collected.at(inpt);
 
             auto dims_ = ubuf_map["dimensionality"].at(0);
+            // 2026-09-28: a 0-dim port (domain = root only, e.g. a reduction's
+            // init write after the accumulation-register rewrite) is a single
+            // access: no strides, so no deltas. Previously address_stride.at(0)
+            // threw vector::_M_range_check on the empty stride list.
+            if (dims_ == 0 || ubuf_map["address_stride"].empty()) {
+              cout << "0-dim in port, no deltas" << endl;
+              continue;
+            }
             int offset = 0;
             for(auto it2: ubuf_map["extents"]) {
               extents_sub_1.push_back(it2 - 1);
@@ -3401,6 +3495,10 @@ CoreIR::Module*  generate_coreir_without_ctrl(CodegenOptions& options,
             auto ubuf_map = out_ports_collected.at(inpt);
 
             auto dims_ = ubuf_map["dimensionality"].at(0);
+            if (dims_ == 0 || ubuf_map["address_stride"].empty()) {
+              cout << "0-dim out port, no deltas" << endl;
+              continue;
+            }
             int offset = 0;
             for(auto it2: ubuf_map["extents"]) {
               extents_sub_1.push_back(it2 - 1);
@@ -5166,6 +5264,18 @@ bool MemtileReplaceMetaMapper(Instance* cnst) {
   }
   ModuleDef* def = cnst->getContainer();
 
+  // At least 2 ports each (the Amber MEM tile); more when the lake collateral
+  // allows them (e.g. 4 outputs on an in4/out4 lake spec), else the selects
+  // below fail on data_out_2.
+  int num_inputs = 2, num_outputs = 2;
+  auto mem_genargs = cnst->getModuleRef()->getGenArgs();
+  if (mem_genargs.count("num_inputs")) {
+    num_inputs = max(num_inputs, mem_genargs.at("num_inputs")->get<int>());
+  }
+  if (mem_genargs.count("num_outputs")) {
+    num_outputs = max(num_outputs, mem_genargs.at("num_outputs")->get<int>());
+  }
+
   Values genargs({{"has_external_addrgen", Const::make(c, false)},
   {"has_flush", Const::make(c, true)},
   {"has_read_valid", Const::make(c, false)},
@@ -5175,8 +5285,8 @@ bool MemtileReplaceMetaMapper(Instance* cnst) {
   {"is_rom", Const::make(c, true)},
   {"use_prebuilt_mem", Const::make(c, true)},
   {"has_chain_en", Const::make(c, false)},
-  {"num_inputs", Const::make(c, 2)},
-  {"num_outputs", Const::make(c, 2)},
+  {"num_inputs", Const::make(c, num_inputs)},
+  {"num_outputs", Const::make(c, num_outputs)},
   {"width", Const::make(c, 16)}});
 
   auto config_file = cnst->getMetaData()["config"];
@@ -5664,6 +5774,98 @@ void disconnect_input_enable(Context* c, Module* top) {
 }
 
 
+// 2026-10-01: dense-RV stream framing. Every op of a dense RV stencil pipeline
+// fires once per token of the INPUT stream (e.g. harris 68x261 = 17,748 tokens,
+// junk at the borders; the GLB store keeps the valid tokens by its static in2glb
+// schedule). The shift-register re-framing in the bank loop (use_domains_save)
+// only puts a bank's readers on that bank's WRITER domain, so line buffers after
+// the first stage keep their own op domains (harris lxx 66x259, cim 64x257 with
+// pitch 64; unsharp reciprocal 62x250; camera g_gr/b_b): their writers stop
+// accepting early (fork stall -> STRM_G2F hang) and the row taps land columns off.
+// Re-frame every 2-D RV line-buffer bank onto the input frame F: all ports on
+// domain F with linear frame addressing (stride [1, F0], offset 0), and each
+// reader's lag = its static-schedule lag (tb2out_k - in2agg_0, split into rows
+// and columns by the cycle row pitch) as precursor deltas. F = a bank writer
+// domain whose size equals an input IO stream length. A no-op where the banks
+// already match (conv_3_3, gaussian, matmul); reuse buffers (explicit
+// [l, l, scalar] deps) are skipped. RTL-verified on harris (16x8 rv spec).
+static void rv_reframe_line_buffers(Module* top) {
+  if (!dense_rv_compile() || !top->hasDef()) return;
+  auto def = top->getDef();
+  std::set<long> io_lens;
+  for (auto it : def->getInstances()) {
+    auto inst = it.second;
+    if (!inst->hasMetaData()) continue;
+    Json md = inst->getMetaData();
+    if (md.count("glb2out_0") && md["glb2out_0"].count("extent")) {
+      long n = 1;
+      for (auto e : md["glb2out_0"]["extent"]) n *= e.get<long>();
+      io_lens.insert(n);
+    }
+  }
+  auto is_rv_line_buffer = [](const Json& c) {
+    for (auto key : {"dep_values", "port_mappings", "domain", "access_map", "in2agg_0"})
+      if (!c.count(key)) return false;
+    for (auto& dv : c["dep_values"].items())
+      if (!dv.value().is_null() && dv.value().size() != 2) return false;
+    for (auto& d : c["domain"].items())
+      if (!d.value().count("extents") || d.value()["extents"].size() != 2) return false;
+    return true;
+  };
+  auto port_of = [](const string& pt) { return pt.substr(pt.rfind('.') + 1); };
+  vector<int> F;
+  for (auto it : def->getInstances()) {
+    auto inst = it.second;
+    if (!F.empty()) break;
+    if (!inst->hasMetaData() || !inst->getMetaData().count("config")) continue;
+    Json c = inst->getMetaData()["config"];
+    if (!is_rv_line_buffer(c)) continue;
+    for (auto& pm : c["port_mappings"].items()) {
+      if (port_of(pm.value().get<string>()).rfind("data_in", 0) != 0 || !c["domain"].count(pm.key())) continue;
+      auto ext = c["domain"][pm.key()]["extents"].get<vector<int>>();
+      if (io_lens.count((long) ext[0] * ext[1])) { F = ext; break; }
+    }
+  }
+  if (F.empty()) {
+    cout << "RV reframe: no line-buffer bank on an input stream frame; nothing to do" << endl;
+    return;
+  }
+  for (auto it : def->getInstances()) {
+    auto inst = it.second;
+    if (!inst->hasMetaData() || !inst->getMetaData().count("config")) continue;
+    Json c = inst->getMetaData()["config"];
+    if (!is_rv_line_buffer(c)) continue;
+    string shrt = it.first.substr(it.first.rfind('$') + 1);
+    int w0 = c["in2agg_0"]["cycle_starting_addr"][0].get<int>();
+    int changed = 0;
+    for (auto& pm : c["port_mappings"].items()) {
+      string op = pm.key(), pt = pm.value().get<string>(), port = port_of(pt);
+      if (!c["domain"].count(op) || !c["access_map"].count(op)) continue;
+      Json before = Json::array({c["domain"][op], c["access_map"][op],
+                                 c.count("precursor_deltas") && c["precursor_deltas"].count(op) ? c["precursor_deltas"][op] : Json()});
+      c["domain"][op]["extents"] = Json::array({F[0], F[1]});
+      c["domain"][op]["dimensionality"] = Json::array({2});
+      c["access_map"][op]["address_stride"] = Json::array({1, F[0]});
+      c["access_map"][op]["address_offset"] = Json::array({0});
+      string tbk = "tb2out_" + (port.rfind("data_out_", 0) == 0 ? port.substr(9) : string("?"));
+      if (pt.rfind(shrt + ".", 0) == 0 && c.count(tbk)) {
+        int lc = c[tbk]["cycle_starting_addr"][0].get<int>() - w0;
+        int pc = c[tbk]["cycle_stride"].size() > 1 ? c[tbk]["cycle_stride"][1].get<int>() : 1;
+        if (lc >= 0 && pc > 0)
+          c["precursor_deltas"][op] = Json::array({Json::array({1, lc / pc}), Json::array({0, lc % pc})});
+      }
+      Json after = Json::array({c["domain"][op], c["access_map"][op],
+                                c.count("precursor_deltas") && c["precursor_deltas"].count(op) ? c["precursor_deltas"][op] : Json()});
+      if (before != after) changed++;
+    }
+    if (changed) {
+      inst->getMetaData()["config"] = c;
+      cout << "RV reframe " << shrt << ": " << changed << " port configs -> frame ["
+           << F[0] << ", " << F[1] << "]" << endl;
+    }
+  }
+}
+
 // Pass to map Tahoe memory tile intended for metamapper
 void map_memory(CodegenOptions& options, Module* top, map<string, UBuffer> & buffers, bool garnet_syntax_trans = false) {
   auto c = top->getContext();
@@ -5707,6 +5909,7 @@ void map_memory(CodegenOptions& options, Module* top, map<string, UBuffer> & buf
   // c->runPasses({"pondsubstitutemetamapper"});
   c->addPass(new MapperPasses::RegfileSubstituteMetaMapper);
   c->runPasses({"regfilesubstitutemetamapper"});
+  rv_reframe_line_buffers(top);
 
 }
 
@@ -6343,6 +6546,23 @@ void generate_coreir_without_ctrl(CodegenOptions& options,
       cout << "Getting remaining data..." << endl;
       auto remaining_data = buf_object.get_remaining_data(output_port, 0);
       cout << "This much data left (before starting...): " << remaining_data << endl;
+      // 2026-10-01 (dense RV): no fabric pre-fill from this walk. Its remaining
+      // data is the column (level-0) part of the port's precursor, which the
+      // walk used to place in PE FIFOs because the lake converter used to apply
+      // only the row level of a MEM read's precursor. The converter now applies
+      // all levels (lake spec.py, 2026-09-28, needed when pitch != extent) and
+      // rv_reframe_line_buffers sets every MEM reader's precursor to its full
+      // static-schedule lag, so the column part is already in the MEM tap and
+      // the shift-register chains add their own delays: placing it again
+      // delays the whole tap row by one more token (unsharp: blur row -3,
+      // 1-3 LSB errors on 3% of pixels). Ports siphoned straight off a writer
+      // (entry = data_in) have static lag 0 and only a domain-index halo here
+      // (unsharp gray / umax).
+      if (dense_rv_compile() && remaining_data > 0) {
+        cout << "RV pre-fill: skipping " << remaining_data << " token(s) for "
+             << output_port << " (entry " << entry_point << ")" << endl;
+        remaining_data = 0;
+      }
       auto any_non_pe = false;
       int loop_tries = 1000;
       while(remaining_data > 0){
@@ -6479,9 +6699,34 @@ void generate_coreir_without_ctrl(CodegenOptions& options,
           // for(auto it__ : inst_metadata) {
           cout << inst_metadata << endl;
           // }
+          // Per-port PE FIFO pre-fill metadata (2026-09-30). Garnet's
+          // CoreCombinerCore RV-PE branch (core_combiner_core.py:321-330)
+          // iterates the PE metadata dict, strips a leading '.', remaps via
+          // p_remap['alu'][port], and reads nested num_input_fifo/num_output_fifo
+          // per data port — matching the stock apps/unsharp/bin_hardcoded format
+          // {".data1": {"num_input_fifo":1,"num_output_fifo":0}}. The old flat
+          // keys (inst_metadata["num_input_fifo"]) made port=="num_input_fifo" ->
+          // p_remap['alu'] KeyError, AND two walks into one PE (e.g. unsharp
+          // muladd_s0_i3087 fed by both gray d_reg and ub_gray_stencil_bank_6)
+          // clobbered each other. Keyed by the exact entry port from
+          // downstream_connection, merged into whatever metadata (incl pe_inst,
+          // prior .dataN) the instance already carries. RV-only: this walk runs
+          // only for ports in precursor_extra, which is populated only from
+          // precursor deltas (RV) — static compile output is unchanged.
+          string pe_port;
+          if(downstream_connection.size() > instance_name.size()){
+            pe_port = downstream_connection.substr(instance_name.size() + 1); // e.g. "data0"
+          }
+          if(pe_port.empty()){
+            cout << "PE FIFO pre-fill: could not derive port from "
+                 << downstream_connection << "; skipping fifo metadata" << endl;
+          }
+
           // prg_instances.at(instance_name)["config"]["num_input_fifo"] = num_input_fifo;
           // downstream_inst->getModArgs()["num_input_fifo"] = CoreIR::IntType(num_input_fifo);
-          inst_metadata["num_input_fifo"] = num_input_fifo;
+          if(!pe_port.empty()){
+            inst_metadata["." + pe_port]["num_input_fifo"] = num_input_fifo;
+          }
 
           if(remaining_data <= num_output_fifo_max){
             num_output_fifo = remaining_data;
@@ -6496,7 +6741,9 @@ void generate_coreir_without_ctrl(CodegenOptions& options,
           }
 
           // downstream_inst->getModArgs()["num_output_fifo"] = CoreIR::IntType(num_output_fifo);
-          inst_metadata["num_output_fifo"] = num_output_fifo;
+          if(!pe_port.empty()){
+            inst_metadata["." + pe_port]["num_output_fifo"] = num_output_fifo;
+          }
           downstream_inst->setMetaData(inst_metadata);
 
           // prg_instances.at(instance_name)["config"]["num_output_fifo"] = num_output_fifo;
