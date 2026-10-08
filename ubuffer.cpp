@@ -4254,6 +4254,9 @@ struct RVPondAccum {
   // 2026-10: tile-pixel loops (innermost; the only loops that move the
   // address) of an output-stationary TILE accumulator; 0 = scalar accumulator
   int n_tpix = 0;
+  // static port times of the first pixel (writes: when the write is issued)
+  // and the smallest pixel-to-pixel step (static_pond_keeps_pixel_loops)
+  int t_init_last = 0, t_upd_first = 0, t_upd_last = 0, t_init = 0, t_final = 0, t_final_last = 0, step = 0;
 };
 
 int rv_pond_dims();
@@ -4550,6 +4553,13 @@ static bool rv_pond_accumulation(UBuffer& buf, RVPondAccum& pa) {
     cout << "RV pond " << buf.name << ": static schedule starts the next pixel's init " << (t_final_last - t_init - step)
          << " cycle(s) before the final read; the RV dependence w_init <- r_final orders them" << endl;
   }
+  pa.t_init = t_init;
+  pa.t_init_last = t_init_last;
+  pa.t_upd_first = t_upd_first;
+  pa.t_upd_last = t_upd_last;
+  pa.t_final = t_final;
+  pa.t_final_last = t_final_last;
+  pa.step = step;
   int n_tile_pixels = 1;
   for (int j = 0; j < nt; j++) {
     n_tile_pixels *= pix_ex.at(ni - j);
@@ -4578,6 +4588,48 @@ int rv_pond_dims() {
     return pc->iteration_level;
   }
   return 4;
+}
+
+// 2026-10-01: a static accumulation pond on a lake-spec pond (pond collateral
+// loaded) keeps its pixel loops and runs off the global flush, like the RV pond,
+// instead of being restarted per pixel by a flush controller. A restart cannot
+// order pixel p+1's init after pixel p's final read, and the final read sits in
+// the window's last cycle, where the next restart lands. With the pond's store
+// latency L in the schedule (garnet_schedule_info) the global schedule keeps
+//   init + L <= first update read, last update write + L <= final read,
+//   final read <= next pixel's init (a read sees the old value in the cycle of a write)
+// so one address serves every pixel and no two writes share a cycle.
+// Scalar accumulators only (a static tiled accumulator is untested).
+static bool static_pond_keeps_pixel_loops(UBuffer& buf) {
+  auto pc = loaded_regfile_collateral();
+  if (!pc) {
+    return false;
+  }
+  RVPondAccum pa;
+  if (!rv_pond_accumulation(buf, pa)) {
+    return false;
+  }
+  int L = pc->store_latency;
+  auto fail = [&](const string& why) {
+    cout << "Static pond " << buf.name << ": restarted per pixel (" << why << ")" << endl;
+    return false;
+  };
+  if (pa.n_tpix != 0) {
+    return fail("tiled accumulator");
+  }
+  if (pa.n_pix + pa.n_red > pc->iteration_level) {
+    return fail(str(pa.n_pix + pa.n_red) + " loops > pond iteration_level " + str(pc->iteration_level));
+  }
+  if (!(pa.t_init_last + L <= pa.t_upd_first && pa.t_upd_last + L <= pa.t_final &&
+        pa.t_final_last <= pa.t_init + pa.step)) {
+    return fail("schedule init " + str(pa.t_init) + ".." + str(pa.t_init_last) + ", updates " +
+                str(pa.t_upd_first) + ".." + str(pa.t_upd_last) + ", final " + str(pa.t_final) + ".." +
+                str(pa.t_final_last) + ", pixel step " + str(pa.step) +
+                " does not order init -> updates -> final read -> next init with store latency " + str(L));
+  }
+  cout << "Static pond " << buf.name << ": accumulation pond keeps its " << pa.n_pix
+       << " pixel loop(s) (no per-pixel flush controller)" << endl;
+  return true;
 }
 
 // 2026-09-30: merge adjacent lake levels of RV ports until every port has at
@@ -14206,11 +14258,14 @@ void lower_to_garnet_implementation(CodegenOptions& options,
     // loops and runs lake's accumulation program over them, instead of being
     // restarted per pixel by a flush controller (see rv_pond_accumulation)
     const char* dense_ready_valid = std::getenv("DENSE_READY_VALID");
+    bool static_pond_loops = false;
     if (dense_ready_valid && dense_ready_valid[0] == '1' && CGRAImpl.config_mode == "pond") {
       RVPondAccum pa;
       target_buf.rv_pond_accum = rv_pond_accumulation(target_buf, pa);
+    } else if (CGRAImpl.config_mode == "pond") {
+      static_pond_loops = static_pond_keeps_pixel_loops(target_buf);
     }
-    if (!target_buf.rv_pond_accum) {
+    if (!target_buf.rv_pond_accum && !static_pond_loops) {
       cgpl_ctrl_optimization(options, target_buf, CGRAImpl.config_mode,
               cgpl_schedule, decouple_ctrl, substract_glb_latency);
     }

@@ -20374,6 +20374,29 @@ void buffet_schedule(schedule_info& sched, op* root, prog& prg) {
   sanity_check_iis(sched);
 }
 
+// 2026-10-01: a static compile with a pond (regfile-level) collateral schedules
+// a buffer that fits the pond with the pond's own latencies. The lake spec pond's
+// write lands the next cycle (store_latency 1); with the MEM level's 0 an
+// accumulation pond's final read fell in the cycle of its last write, on top of
+// the next pixel's init. Without a pond collateral (legacy pond) or for RV
+// compiles nothing changes.
+static void apply_regfile_latencies(schedule_info& sched, CodegenOptions& options, prog& prg,
+                                    const string& b) {
+  if (dense_rv_compile() || !loaded_regfile_collateral() || !options.mem_hierarchy.count("regfile")) {
+    return;
+  }
+  if (options.get_hierarchy_level(logical_capacity(b, prg)) != "regfile") {
+    return;
+  }
+  auto& rf = options.mem_hierarchy.at("regfile");
+  if (sched.buffer_load_latencies[b] != rf.load_latency || sched.buffer_store_latencies[b] != rf.store_latency) {
+    cout << "\tbuffer " << b << " (regfile level): load/store latency " << rf.load_latency << "/"
+         << rf.store_latency << " from the pond collateral" << endl;
+  }
+  sched.buffer_load_latencies[b] = rf.load_latency;
+  sched.buffer_store_latencies[b] = rf.store_latency;
+}
+
 schedule_info garnet_schedule_info(CodegenOptions& options, prog& prg, bool use_metamapper=false, string dse_compute_filename="") {
   schedule_info sched;
   sched.use_metamapper = use_metamapper;
@@ -20456,6 +20479,7 @@ schedule_info garnet_schedule_info(CodegenOptions& options, prog& prg, bool use_
         if (!prg.is_boundary(b)) {
           sched.buffer_load_latencies[b] = buffer_load_latency(options, b);
           sched.buffer_store_latencies[b] = buffer_store_latency(options, b);
+          apply_regfile_latencies(sched, options, prg, b);
         } else {
           sched.buffer_load_latencies[b] = 0;
           sched.buffer_store_latencies[b] = 0;
@@ -20509,6 +20533,7 @@ schedule_info garnet_schedule_info(CodegenOptions& options, prog& prg, bool use_
         if (!prg.is_boundary(b)) {
           sched.buffer_load_latencies[b] = buffer_load_latency(options, b);
           sched.buffer_store_latencies[b] = buffer_store_latency(options, b);
+          apply_regfile_latencies(sched, options, prg, b);
         } else {
           sched.buffer_load_latencies[b] = 0;
           sched.buffer_store_latencies[b] = 0;
