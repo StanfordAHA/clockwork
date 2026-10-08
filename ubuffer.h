@@ -1365,6 +1365,22 @@ class UBuffer {
           bool war_empty = empty(war_validity);
           if (war_empty) {
             rv_war_empty.insert({inpt__, outpt__});
+            // 2026-10-07: a reader that starts only after the writer's last
+            // write has the whole frame resident, so it cannot be overrun
+            // either: drop the WAR (as for the fallback buffers below). Lake's
+            // null-WAR placeholder (writer at most 8 rows ahead) stops the writer
+            // more than a row ahead of a zero-lag reader, whose level-0 RAW
+            // (one-row wrap fixup) then never holds: matmul_tile ux=4's kernel
+            // bank of hw_input (written 0..255, read from 256) deadlocked.
+            auto w_times = to_set(range(its(writer_sched_map, to_uset(writer_domain))));
+            auto r_times = to_set(range(its(reader_sched_map, to_uset(reader_domain))));
+            int w_last = to_int(lexmaxval(w_times));
+            int r_first = to_int(lexminval(r_times));
+            if (w_last < r_first) {
+              rv_omit_deps.insert({inpt__, outpt__});
+              cout << "RV deps " << name << ": " << inpt__ << " finishes (" << w_last << ") before "
+                   << outpt__ << " starts (" << r_first << "); no WAR" << endl;
+            }
           }
           bool uniform = !raw_empty &&
               ::num_dims(reader_domain) == ::num_dims(writer_domain) &&

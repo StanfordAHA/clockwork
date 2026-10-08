@@ -5860,7 +5860,12 @@ static void rv_reframe_line_buffers(Module* top) {
       if (pt.rfind(shrt + ".", 0) == 0 && c.count(tbk)) {
         int lc = c[tbk]["cycle_starting_addr"][0].get<int>() - w0;
         int pc = c[tbk]["cycle_stride"].size() > 1 ? c[tbk]["cycle_stride"][1].get<int>() : 1;
-        if (lc >= 0 && pc > 0)
+        // A reader that starts only after the writer's whole frame (lag >= F0*F1) is a
+        // second pass over a complete frame, not a window sliding with the writer: its
+        // i-th read is the i-th element written, so no precursor (lake would shift its
+        // address before the frame). matmul_tile ux=4: the kernel op's own bank of
+        // hw_input is read in write order starting at cycle 256 = 16x16.
+        if (lc >= 0 && pc > 0 && lc < F[0] * F[1])
           c["precursor_deltas"][op] = Json::array({Json::array({1, lc / pc}), Json::array({0, lc % pc})});
       }
       Json after = Json::array({c["domain"][op], c["access_map"][op],
