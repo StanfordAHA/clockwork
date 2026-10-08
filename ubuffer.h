@@ -2162,6 +2162,13 @@ class UBuffer {
       if (!acc_equal) {
         return false;
       }
+      // Same schedule function on the same domain (the lanes of an unrolled op) means equal
+      // schedule ranges. Check that first: comparing the ranges themselves can take isl hours
+      // (matmul_tile ux=4: the 4 unrolled mul lanes' shared input read, a 1-D range
+      // 528 + 572a + 143b + 8c + 2d with existentials; compile_mem ran > 1 h).
+      if (equal_regardless_of_domain(to_map(schedule.at(pt0)), to_map(schedule.at(pt1)))) {
+        return true;
+      }
       auto sched_0 = range(schedule.at(pt0));
       auto sched_1 = range(schedule.at(pt1));
       bool sched_equal = equal(sched_0, sched_1);
