@@ -4251,7 +4251,45 @@ struct RVPondAccum {
   string w_upd, r_upd, w_init, r_final;
   int n_pix;   // pixel loops (outermost, shared by all ports), excluding root
   int n_red;   // reduction loops of the update op, inside the pixel loops
+  // 2026-10: tile-pixel loops (innermost; the only loops that move the
+  // address) of an output-stationary TILE accumulator; 0 = scalar accumulator
+  int n_tpix = 0;
 };
+
+int rv_pond_dims();
+
+// 2026-10: linear (fw=1) pond address of port p: coefficient per isl dim
+// (1..nd) and the address at the domain mins (lake counters start at 0).
+// Same linearization as the static pond (generate_ubuf_args) and
+// add_rv_info_to_json (address-range union; not global_range(): a lowered
+// bank copy has no isl ctx member).
+static bool rv_pond_linear_addr(UBuffer& buf, const string& p, vector<int>& coeff, int& offset) {
+  uset* granges = nullptr;
+  for (auto am : buf.access_map) {
+    granges = granges == nullptr ? range(am.second) : unn(granges, range(am.second));
+  }
+  if (granges == nullptr || isl_union_set_n_set(granges) != 1) {
+    return false;
+  }
+  auto acc = to_map(buf.access_map.at(p));
+  auto grange = to_set(granges);
+  if (::num_dims(grange) > 1) {
+    acc = dot(acc, linear_address_map_lake(grange, 1));
+  }
+  auto a = get_aff(acc);
+  auto d = buf.domain.at(p);
+  int nd = ::num_dims(d) - 1;
+  auto mn = mins(d);
+  auto ex = extents(d);
+  coeff.assign(nd + 1, 0);
+  offset = int_const_coeff(a);
+  for (int l = 1; l <= nd; l++) {
+    offset += int_coeff(a, l) * mn.at(l);
+    // an extent-1 loop never moves the address (its value is in the offset)
+    coeff.at(l) = ex.at(l) > 1 ? int_coeff(a, l) : 0;
+  }
+  return true;
+}
 
 // lake build_pond_rv (garnet's pond): 11-bit iteration domains, extents
 // 2..2048. A level whose wrap fixup can fire (the update ports' reduction
@@ -4267,6 +4305,25 @@ static int rv_pond_max_extent() {
     return pc->counter_ub + 1;
   }
   return 2048;
+}
+
+// 2026-10: lake levels of a tiled accumulator's tile-pixel loops (isl dims
+// ni-nt+1..ni of an init / final port): ONE level when the address is linear
+// across them (exact: the iteration order is unchanged) and the tile fits a
+// level, else one level per loop.
+static int rv_pond_tile_pixel_levels(const vector<int>& ex, const vector<int>& coeff, int ni, int nt, int max_extent) {
+  if (nt <= 1) {
+    return nt;
+  }
+  int t = 1;
+  bool linear = true;
+  for (int l = ni - nt + 1; l <= ni; l++) {
+    t *= ex.at(l);
+    if (l < ni && coeff.at(l) != coeff.at(l + 1) * ex.at(l + 1)) {
+      linear = false;
+    }
+  }
+  return (linear && t <= max_extent) ? 1 : nt;
 }
 
 static bool rv_pond_accumulation(UBuffer& buf, RVPondAccum& pa) {
@@ -4303,15 +4360,55 @@ static bool rv_pond_accumulation(UBuffer& buf, RVPondAccum& pa) {
   pa.r_final = outs.at(0) == pa.r_upd ? outs.at(1) : outs.at(0);
 
   // loop structure: the init / final ops iterate the pixel loops, the update
-  // op the same pixel loops plus the reduction loops
+  // op the same pixel loops plus the reduction loops.
+  // 2026-10: output-stationary TILE accumulators (e.g. matmul tiled with the
+  // reduction outside the tile's pixels): init / final iterate [pixel (tile)
+  // loops, tile-pixel loops], the update op [pixel loops, reduction loops,
+  // tile-pixel loops]; only the tile-pixel loops move the address. The scalar
+  // accumulator is the case without tile-pixel loops (n_tpix 0).
   auto dom = [&](const string& p) { return buf.domain.at(p); };
-  int dp = ::num_dims(dom(pa.w_init)) - 1;
-  int du = ::num_dims(dom(pa.w_upd)) - 1;
-  if (::num_dims(dom(pa.r_final)) - 1 != dp || ::num_dims(dom(pa.r_upd)) - 1 != du || du <= dp) {
+  map<string, vector<int>> acoeff;
+  map<string, int> aoff;
+  for (auto p : buf.get_all_ports()) {
+    if (!rv_pond_linear_addr(buf, p, acoeff[p], aoff[p])) {
+      return fail("port " + p + " address range is not a single space");
+    }
+  }
+  int ni = ::num_dims(dom(pa.w_init)) - 1;
+  int nu = ::num_dims(dom(pa.w_upd)) - 1;
+  if (::num_dims(dom(pa.r_final)) - 1 != ni || ::num_dims(dom(pa.r_upd)) - 1 != nu || nu <= ni) {
     return fail("update loops are not the pixel loops plus reduction loops");
   }
+  int nt = 0;
+  while (nt < ni && acoeff.at(pa.w_init).at(ni - nt) != 0) {
+    nt++;
+  }
+  int dp = ni - nt;
+  int du = nu - nt;   // last reduction dim of the update ports
   pa.n_pix = dp;
   pa.n_red = du - dp;
+  pa.n_tpix = nt;
+  if (dp < 1) {
+    return fail("no pixel (tile) loop outside the tile-pixel loops");
+  }
+  for (auto p : buf.get_all_ports()) {
+    int nd = ::num_dims(dom(p)) - 1;
+    for (int l = 1; l <= nd - nt; l++) {
+      if (acoeff.at(p).at(l) != 0) {
+        return fail(nt == 0 ? "port " + p + " does not access the single accumulator address"
+                            : "port " + p + " address moves with a pixel or reduction loop");
+      }
+    }
+    for (int j = 0; j < nt; j++) {
+      if (acoeff.at(p).at(nd - j) != acoeff.at(pa.w_init).at(ni - j)) {
+        return fail("port " + p + " addresses the tile differently");
+      }
+    }
+    if (aoff.at(p) != aoff.at(pa.w_init)) {
+      return fail(nt == 0 ? "port " + p + " does not access the single accumulator address"
+                          : "port " + p + " tile address offset differs");
+    }
+  }
   for (auto p : buf.get_all_ports()) {
     auto ex = extents(dom(p));
     int pts = 1;
@@ -4328,9 +4425,15 @@ static bool rv_pond_accumulation(UBuffer& buf, RVPondAccum& pa) {
   for (auto p : buf.get_all_ports()) {
     auto ex = extents(dom(p));
     auto mn = mins(dom(p));
+    int nd = ::num_dims(dom(p)) - 1;
     for (int l = 1; l <= dp; l++) {
       if (ex.at(l) != pix_ex.at(l) || mn.at(l) != pix_min.at(l)) {
         return fail("port " + p + " iterates other pixel loops");
+      }
+    }
+    for (int j = 0; j < nt; j++) {
+      if (ex.at(nd - j) != pix_ex.at(ni - j) || mn.at(nd - j) != pix_min.at(ni - j)) {
+        return fail("port " + p + " iterates other tile-pixel loops");
       }
     }
   }
@@ -4338,7 +4441,7 @@ static bool rv_pond_accumulation(UBuffer& buf, RVPondAccum& pa) {
     n_pixels *= pix_ex.at(l);
   }
   if (n_pixels < 2) {
-    return fail("a single pixel");
+    return fail(nt == 0 ? "a single pixel" : "a single tile");
   }
   auto upd_ex = extents(dom(pa.w_upd));
   auto upd_min = mins(dom(pa.w_upd));
@@ -4361,20 +4464,32 @@ static bool rv_pond_accumulation(UBuffer& buf, RVPondAccum& pa) {
       }
     }
   }
-
-  // one address for every port
-  isl_set* addr = nullptr;
-  for (auto p : buf.get_all_ports()) {
-    auto rg = range(to_map(buf.access_map.at(p)));
-    if (int_upper_bound(card(rg)) != 1 || (addr != nullptr && !equal(rg, addr))) {
-      return fail("port " + p + " does not access the single accumulator address");
+  if (nt > 0) {
+    // lake levels, as add_rv_pond_info_to_json emits them: tile pixels (one
+    // level when the address is linear across them), reduction, pixel (tile)
+    // level(s). The pond's iteration domains must hold them, and no
+    // constraint may sit on the TOP level of a power-of-2-dims pond (lake's
+    // RV comparison network wrap-fixup refuses non-barrier constraints there).
+    int n_tp_levels = rv_pond_tile_pixel_levels(pix_ex, acoeff.at(pa.w_init), ni, nt, max_extent);
+    int n_pix_levels = 1;
+    if (n_pixels > max_extent) {
+      n_pix_levels = 0;
+      for (int l = 1; l <= dp; l++) {
+        n_pix_levels += pix_ex.at(l) > 1;
+      }
     }
-    addr = rg;
+    int D = rv_pond_dims();
+    if (n_tp_levels + 1 + n_pix_levels > D) {
+      return fail(str(n_tp_levels + 1 + n_pix_levels) + " lake levels for the update ports (pond has " + str(D) + ")");
+    }
+    if ((D & (D - 1)) == 0 && n_tp_levels + 1 >= D - 1) {
+      return fail("tile constraint on the top level of a " + str(D) + "-dim pond");
+    }
   }
 
-  // static order per pixel: init <= first update read, last update write <=
-  // final read <= next pixel's init (same pixel coefficients everywhere, so
-  // compare the times of each port's first pixel)
+  // static order per pixel (tile): init <= first update read, last update
+  // write <= final read <= next pixel's init (same pixel coefficients
+  // everywhere, so compare the times of each port's first pixel)
   auto sched_aff = [&](const string& p) { return get_aff(to_map(buf.schedule.at(p))); };
   vector<int> pix_coeff;
   for (int l = 1; l <= dp; l++) {
@@ -4396,12 +4511,13 @@ static bool rv_pond_accumulation(UBuffer& buf, RVPondAccum& pa) {
     }
     return t;
   };
-  // time span of the reduction loops (min, max) relative to their first iteration
-  auto red_span = [&](const string& p, bool want_max) {
+  // time span (min, max) of the dims [lo, hi] relative to their first iteration
+  auto span = [&](const string& p, int lo, int hi, bool want_max) {
     auto a = sched_aff(p);
+    auto ex = extents(dom(p));
     int s = 0;
-    for (int l = dp + 1; l <= du; l++) {
-      int d = int_coeff(a, l) * (upd_ex.at(l) - 1);
+    for (int l = lo; l <= hi; l++) {
+      int d = int_coeff(a, l) * (ex.at(l) - 1);
       s += want_max ? max(d, 0) : min(d, 0);
     }
     return s;
@@ -4416,24 +4532,38 @@ static bool rv_pond_accumulation(UBuffer& buf, RVPondAccum& pa) {
     step = min(step, d);
   }
   int t_init = first_time(pa.w_init);
-  int t_upd_first = first_time(pa.r_upd) + red_span(pa.r_upd, false);
-  int t_upd_last = first_time(pa.w_upd) + red_span(pa.w_upd, true);
-  int t_final = first_time(pa.r_final);
-  if (step <= 0 || !(t_init <= t_upd_first && t_upd_last <= t_final)) {
+  int t_init_last = t_init + span(pa.w_init, dp + 1, ni, true);
+  int t_upd_first = first_time(pa.r_upd) + span(pa.r_upd, dp + 1, nu, false);
+  int t_upd_last = first_time(pa.w_upd) + span(pa.w_upd, dp + 1, nu, true);
+  int t_final = first_time(pa.r_final) + span(pa.r_final, dp + 1, ni, false);
+  int t_final_last = first_time(pa.r_final) + span(pa.r_final, dp + 1, ni, true);
+  if (step <= 0 || !(t_init_last <= t_upd_first && t_upd_last <= t_final)) {
     return fail("static schedule is not init <= updates <= final read (init " + str(t_init) +
-                ", updates " + str(t_upd_first) + ".." + str(t_upd_last) + ", final " + str(t_final) +
-                ", pixel step " + str(step) + ")");
+                ".." + str(t_init_last) + ", updates " + str(t_upd_first) + ".." + str(t_upd_last) +
+                ", final " + str(t_final) + ", pixel step " + str(step) + ")");
   }
   // The next pixel's init may be scheduled before this pixel's final read
-  // (fw2 single-port resnet_pond: final +24, pixel step 23); the RV program
-  // orders it anyway (w_init <- r_final).
-  if (t_final > t_init + step) {
-    cout << "RV pond " << buf.name << ": static schedule starts the next pixel's init " << (t_final - t_init - step)
+  // (fw2 single-port resnet_pond: final +24, pixel step 23; a tiled
+  // accumulator's next-tile init overlaps this tile's final reads); the RV
+  // program orders it anyway (w_init <- r_final).
+  if (t_final_last > t_init + step) {
+    cout << "RV pond " << buf.name << ": static schedule starts the next pixel's init " << (t_final_last - t_init - step)
          << " cycle(s) before the final read; the RV dependence w_init <- r_final orders them" << endl;
   }
-  cout << "RV pond " << buf.name << ": accumulation pond, " << n_pixels << " pixels x "
-       << int_upper_bound(card(dom(pa.w_upd))) / n_pixels << " reduction steps; update "
-       << pa.w_upd << " / " << pa.r_upd << ", init " << pa.w_init << ", final " << pa.r_final << endl;
+  int n_tile_pixels = 1;
+  for (int j = 0; j < nt; j++) {
+    n_tile_pixels *= pix_ex.at(ni - j);
+  }
+  if (nt == 0) {
+    cout << "RV pond " << buf.name << ": accumulation pond, " << n_pixels << " pixels x "
+         << int_upper_bound(card(dom(pa.w_upd))) / n_pixels << " reduction steps; update "
+         << pa.w_upd << " / " << pa.r_upd << ", init " << pa.w_init << ", final " << pa.r_final << endl;
+  } else {
+    cout << "RV pond " << buf.name << ": tiled accumulation pond, " << n_pixels << " tiles x "
+         << n_red << " reduction steps x " << n_tile_pixels << " accumulators; update "
+         << pa.w_upd << " / " << pa.r_upd << ", init (one clear per tile) " << pa.w_init
+         << ", final " << pa.r_final << endl;
+  }
   return true;
 }
 
@@ -4577,21 +4707,35 @@ Json UBuffer::add_rv_pond_info_to_json(Json config_file, UBuffer& target_buf) {
   }
   int max_extent = rv_pond_max_extent();
   int dp = pa.n_pix;
+  int nt = pa.n_tpix;
   auto pix_ex = extents(target_buf.domain.at(pa.w_init));
   int n_pixels = 1;
   for (int l = 1; l <= dp; l++) {
     n_pixels *= pix_ex.at(l);
   }
   bool merge_pix = n_pixels <= max_extent;
+  // 2026-10: tile accumulators -- tile-pixel loops as one lake level when the
+  // address is linear across them (see rv_pond_tile_pixel_levels)
+  vector<int> init_coeff;
+  int init_off = 0;
+  rv_pond_linear_addr(target_buf, pa.w_init, init_coeff, init_off);
+  int ni = ::num_dims(target_buf.domain.at(pa.w_init)) - 1;
+  bool merge_tp = nt > 1 && rv_pond_tile_pixel_levels(pix_ex, init_coeff, ni, nt, max_extent) == 1;
 
-  // lake levels (innermost first) of port p: [reduction,] pixel level(s)
-  auto emit = [&](const string& p, bool upd) {
+  // lake levels (innermost first) of port p: [tile pixels,] [reduction,]
+  // pixel (tile) level(s); the clear port (w_init) only the pixel level(s):
+  // one clear per pixel / tile
+  int n_tp_levels = 0;
+  auto emit = [&](const string& p, bool upd, bool tile_pix) {
     auto d = target_buf.domain.at(p);
     auto ex = extents(d);
     auto mn = mins(d);
     auto a = get_aff(to_map(target_buf.schedule.at(p)));
     int nd = ::num_dims(d) - 1;
-    vector<int> lex, lst;
+    vector<int> acoeff;
+    int aoff = 0;
+    rv_pond_linear_addr(target_buf, p, acoeff, aoff);
+    vector<int> lex, lst, las;
     // isl dims [lo, hi] as one level: extent product, stride of the innermost
     auto merged = [&](int lo, int hi) {
       int e = 1;
@@ -4606,9 +4750,20 @@ Json UBuffer::add_rv_pond_info_to_json(Json config_file, UBuffer& target_buf) {
       }
       lex.push_back(e);
       lst.push_back(int_coeff(a, hi));
+      las.push_back(acoeff.at(hi));
     };
+    if (tile_pix && nt > 0) {
+      if (merge_tp) {
+        merged(nd - nt + 1, nd);
+      } else {
+        for (int l = nd; l > nd - nt; l--) {
+          merged(l, l);
+        }
+      }
+      n_tp_levels = lex.size();
+    }
     if (upd) {
-      merged(dp + 1, nd);
+      merged(dp + 1, nd - nt);
     }
     if (merge_pix) {
       merged(1, dp);
@@ -4628,25 +4783,31 @@ Json UBuffer::add_rv_pond_info_to_json(Json config_file, UBuffer& target_buf) {
     config_file["domain"][p]["dimensionality"] = {n};
     config_file["domain"][p]["extents"] = lex;
     config_file["access_map"][p]["dimensionality"] = {n};
-    config_file["access_map"][p]["address_offset"] = {0};
-    config_file["access_map"][p]["address_stride"] = vector<int>(n, 0);
+    config_file["access_map"][p]["address_offset"] = {nt > 0 && tile_pix ? aoff : 0};
+    config_file["access_map"][p]["address_stride"] = nt > 0 ? las : vector<int>(n, 0);
     config_file["rv_sched"][p]["offset"] = {off};
     config_file["rv_sched"][p]["stride"] = lst;
     cout << "RV pond " << p << ": extents " << config_file["domain"][p]["extents"]
          << ", schedule " << config_file["rv_sched"][p] << endl;
   };
-  emit(pa.w_upd, true);
-  emit(pa.r_upd, true);
-  emit(pa.w_init, false);
-  emit(pa.r_final, false);
+  emit(pa.w_upd, true, true);
+  emit(pa.r_upd, true, true);
+  emit(pa.w_init, false, false);
+  emit(pa.r_final, false, true);
 
+  // the scalar program with every level shifted by the tile-pixel levels:
+  //   r_upd reads step k once w_upd finished k-1      (r_upd,P | w_upd,P, -1)
+  //   r_final reads tile t once w_upd moved past it    (r_final,P | w_upd,P+1, 0)
+  //   r_upd starts tile t once w_init cleared it       (r_upd,P+1 | w_init,0, 0)
+  //   w_init clears tile t+1 once r_final read tile t  (w_init,0 | r_final,P, 1)
+  int P = n_tp_levels;
   auto dep = [&](const string& p0, const string& p1, vector<int> v) {
     config_file["dep_values"][p0 + "___DEPTO___" + p1] = v;
   };
-  dep(pa.r_upd, pa.w_upd, {0, 0, -1});
-  dep(pa.r_final, pa.w_upd, {0, 1, 0});
-  dep(pa.r_upd, pa.w_init, {1, 0, 0});
-  dep(pa.w_init, pa.r_final, {0, 0, 1});
+  dep(pa.r_upd, pa.w_upd, {P, P, -1});
+  dep(pa.r_final, pa.w_upd, {P, P + 1, 0});
+  dep(pa.r_upd, pa.w_init, {P + 1, 0, 0});
+  dep(pa.w_init, pa.r_final, {0, P, 1});
   return config_file;
 }
 
