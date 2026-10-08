@@ -5789,6 +5789,7 @@ void disconnect_input_enable(Context* c, Module* top) {
 // domain whose size equals an input IO stream length. A no-op where the banks
 // already match (conv_3_3, gaussian, matmul); reuse buffers (explicit
 // [l, l, scalar] deps) are skipped. RTL-verified on harris (16x8 rv spec).
+// fw1 (lake_dp) banks name the same configs in2regfile_0 / regfile2out_k.
 static void rv_reframe_line_buffers(Module* top) {
   if (!dense_rv_compile() || !top->hasDef()) return;
   auto def = top->getDef();
@@ -5803,8 +5804,12 @@ static void rv_reframe_line_buffers(Module* top) {
       io_lens.insert(n);
     }
   }
-  auto is_rv_line_buffer = [](const Json& c) {
-    for (auto key : {"dep_values", "port_mappings", "domain", "access_map", "in2agg_0"})
+  auto writer_key = [](const Json& c) {
+    return string(c.count("in2agg_0") ? "in2agg_0" : (c.count("in2regfile_0") ? "in2regfile_0" : ""));
+  };
+  auto is_rv_line_buffer = [&writer_key](const Json& c) {
+    if (writer_key(c) == "") return false;
+    for (auto key : {"dep_values", "port_mappings", "domain", "access_map"})
       if (!c.count(key)) return false;
     for (auto& dv : c["dep_values"].items())
       if (!dv.value().is_null() && dv.value().size() != 2) return false;
@@ -5817,6 +5822,7 @@ static void rv_reframe_line_buffers(Module* top) {
   for (auto it : def->getInstances()) {
     auto inst = it.second;
     if (!F.empty()) break;
+    if (inst->getModuleRef()->getRefName() != "cgralib.Mem") continue;   // not a PE-tile pond
     if (!inst->hasMetaData() || !inst->getMetaData().count("config")) continue;
     Json c = inst->getMetaData()["config"];
     if (!is_rv_line_buffer(c)) continue;
@@ -5832,11 +5838,14 @@ static void rv_reframe_line_buffers(Module* top) {
   }
   for (auto it : def->getInstances()) {
     auto inst = it.second;
+    if (inst->getModuleRef()->getRefName() != "cgralib.Mem") continue;
     if (!inst->hasMetaData() || !inst->getMetaData().count("config")) continue;
     Json c = inst->getMetaData()["config"];
     if (!is_rv_line_buffer(c)) continue;
     string shrt = it.first.substr(it.first.rfind('$') + 1);
-    int w0 = c["in2agg_0"]["cycle_starting_addr"][0].get<int>();
+    string wk = writer_key(c);
+    string rpre = wk == "in2agg_0" ? "tb2out_" : "regfile2out_";
+    int w0 = c[wk]["cycle_starting_addr"][0].get<int>();
     int changed = 0;
     for (auto& pm : c["port_mappings"].items()) {
       string op = pm.key(), pt = pm.value().get<string>(), port = port_of(pt);
@@ -5847,7 +5856,7 @@ static void rv_reframe_line_buffers(Module* top) {
       c["domain"][op]["dimensionality"] = Json::array({2});
       c["access_map"][op]["address_stride"] = Json::array({1, F[0]});
       c["access_map"][op]["address_offset"] = Json::array({0});
-      string tbk = "tb2out_" + (port.rfind("data_out_", 0) == 0 ? port.substr(9) : string("?"));
+      string tbk = rpre + (port.rfind("data_out_", 0) == 0 ? port.substr(9) : string("?"));
       if (pt.rfind(shrt + ".", 0) == 0 && c.count(tbk)) {
         int lc = c[tbk]["cycle_starting_addr"][0].get<int>() - w0;
         int pc = c[tbk]["cycle_stride"].size() > 1 ? c[tbk]["cycle_stride"][1].get<int>() : 1;

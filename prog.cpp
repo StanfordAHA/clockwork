@@ -6047,13 +6047,22 @@ void dsa_writers(prog& prg) {
   }
 }
 
+// 2026-10-07: a dense ready-valid compile schedules MEM tiles with zero
+// load/store latency. Its cycle schedule is only read for token lags (reader
+// precursors, rv_reframe_line_buffers) and the GLB store's token index
+// (in2glb), and a stream has no SRAM latency: the fw1 (lake_dp) collateral's
+// load/store latency 1 put an extra cycle into every MEM lag and ~10 into in2glb.
+static bool rv_zero_mem_latency(string& bname) {
+  return dense_rv_compile() && !contains(bname, "glb");
+}
+
 int buffer_store_latency(CodegenOptions& options, string& bname) {
 
   if (options.rtl_options.target_tile == TARGET_TILE_SINGLE_FETCH_WITH_ADDRGEN) {
     if (contains(bname, "glb")) {
       return options.mem_hierarchy.at("glb").store_latency;
     } else {
-      return options.mem_hierarchy.at("mem").store_latency;
+      return rv_zero_mem_latency(bname) ? 0 : options.mem_hierarchy.at("mem").store_latency;
     }
   }
   else if (options.rtl_options.target_tile == TARGET_TILE_WIDE_FETCH_WITH_ADDRGEN ) {
@@ -6107,7 +6116,7 @@ int buffer_load_latency(CodegenOptions& options, string& bname) {
     if (contains(bname, "glb")) {
       return options.mem_hierarchy.at("glb").load_latency;
     } else {
-      return options.mem_hierarchy.at("mem").load_latency;
+      return rv_zero_mem_latency(bname) ? 0 : options.mem_hierarchy.at("mem").load_latency;
     }
   }
   else if (options.rtl_options.target_tile == TARGET_TILE_WIDE_FETCH_WITH_ADDRGEN ) {
