@@ -4328,6 +4328,30 @@ static int rv_pond_max_extent() {
 // ni-nt+1..ni of an init / final port): ONE level when the address is linear
 // across them (exact: the iteration order is unchanged) and the tile fits a
 // level, else one level per loop.
+// Iteration-extent bound of the MEM tile's lake levels: the MEM collateral's
+// counter_ub + 1 (LAKE_COLLATERAL_JSON_MEM, as `aha map --collateral` passes
+// it), else 2048; RV_MEM_MAX_EXTENT overrides.
+static int rv_mem_max_extent() {
+  if (const char* m = std::getenv("RV_MEM_MAX_EXTENT")) {
+    return atoi(m);
+  }
+  static int cached = -1;
+  if (cached < 0) {
+    cached = 2048;
+    if (const char* path = std::getenv("LAKE_COLLATERAL_JSON_MEM")) {
+      std::ifstream f(path);
+      if (f) {
+        Json j;
+        f >> j;
+        if (j.count("counter_ub")) {
+          cached = j["counter_ub"].get<int>() + 1;
+        }
+      }
+    }
+  }
+  return cached;
+}
+
 static int rv_pond_tile_pixel_levels(const vector<int>& ex, const vector<int>& coeff, int ni, int nt, int max_extent) {
   if (nt <= 1) {
     return nt;
@@ -5370,6 +5394,78 @@ Json UBuffer::add_rv_info_to_json(Json config_file, UBuffer& target_buf, int fet
     }
     cout << "RV filter " << p << ": " << card_bank << " of " << card_full
          << " stream items, " << config_file["filter"][p] << endl;
+  }
+
+  // 2026-10-08: a bank whose readers all start after its writer's last write
+  // (populate_rv_deps dropped every WAR: the frame is resident, each address
+  // written once), whose remaining deps are level-0 RAWs, and whose ports walk
+  // contiguous addresses is ONE stream: coalesce every port to a single lake
+  // level. A level-0 RAW then compares linear positions, so the reader trails
+  // its writer by lake's zero-lag margin instead of waiting for it to finish
+  // (lake's level-0 compare only fixes up one row of wrap). matmul_tile ux=4's
+  // kernel bank of hw_input: 504 -> 280 cycles in unit RTL. The merged extent
+  // stays within half the level bound (the RV wrap fixup adds an extent).
+  {
+    auto ins = target_buf.get_in_ports();
+    auto outs = target_buf.get_out_ports();
+    bool whole = !ins.empty() && !outs.empty();
+    string why;
+    for (auto w : ins) {
+      for (auto r : outs) {
+        if (!target_buf.rv_omit_deps.count({w, r})) {
+          whole = false;
+        }
+      }
+    }
+    for (auto it : target_buf.dependencies) {
+      if (target_buf.rv_omit_deps.count(it.first)) {
+        continue;
+      }
+      if (target_buf.rv_fallback_deps.count(it.first) || it.second.size() < 2 ||
+          it.second.at(0) != 0 || it.second.at(1) != 0) {
+        whole = false;
+      }
+    }
+    int bound = min(rv_mem_max_extent(), rv_pond_max_extent()) / 2;
+    bool multi = false;
+    for (auto p : target_buf.get_all_ports()) {
+      if (!whole) {
+        break;
+      }
+      if (!config_file["domain"].count(p) || !config_file["access_map"].count(p) ||
+          target_buf.rv_merge_levels.count(p) ||
+          (config_file.count("filter") && config_file["filter"].count(p))) {
+        whole = false;
+        break;
+      }
+      auto ex = config_file["domain"][p]["extents"].get<vector<int> >();
+      auto st = config_file["access_map"][p]["address_stride"].get<vector<int> >();
+      int n = 1;
+      for (int l = 0; l < (int) ex.size(); l++) {
+        n *= ex.at(l);
+        if (l > 0 && st.at(l) != st.at(l - 1) * ex.at(l - 1)) {
+          whole = false;
+          why = p + " addresses are not contiguous across level " + str(l);
+        }
+      }
+      if (n > bound) {
+        whole = false;
+        why = p + " walks " + str(n) + " > " + str(bound) + " words";
+      }
+      multi = multi || ex.size() > 1;
+    }
+    if (whole && multi) {
+      for (auto p : target_buf.get_all_ports()) {
+        int nl = config_file["domain"][p]["extents"].size();
+        if (nl > 1) {
+          target_buf.rv_merge_levels[p] = {0, nl - 1};
+        }
+      }
+      cout << "RV whole-frame bank " << target_buf.name << ": every reader starts after the writer; "
+           << "coalescing each port to one lake level" << endl;
+    } else if (why != "" && !ins.empty() && !outs.empty()) {
+      cout << "RV whole-frame bank " << target_buf.name << ": not coalesced (" << why << ")" << endl;
+    }
   }
 
   // Coalesce the reduction loops of read-modify-write ports (see
