@@ -1133,6 +1133,10 @@ class UBuffer {
     HWconstraints hardware;
     // This is for the final lowering to coreir json...
     map<string, map<string, string>> collect_port_mappings;
+    // 2026-10-08: bank id -> port -> "ub_<bank>_garnet.<mem port>" of THAT bank. collect_port_mappings is
+    // keyed by port only, so a port wired to several banks (a writer broadcast to every bank,
+    // matmul_tile ux=4's init op) kept the last bank's wire in every bank's config port_mappings.
+    map<int, map<string, string>> bank_port_reg_names;
     // This map is to hold how much extra data needs to be added in each direction for each port
     map<string, vector<pair<int, int>>> precursor_extra;
     map<string, vector<pair<int, int>>> precursor_committed;

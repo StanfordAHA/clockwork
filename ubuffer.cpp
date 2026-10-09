@@ -3744,6 +3744,7 @@ void UBuffer::wire_ubuf_IO(CodegenOptions& options,CoreIR::ModuleDef* def, map<s
         auto full_bank_name_with_ub = "ub_" + bank_name_str + "_garnet." + memDatainPort(options, config_mode, inpt_cnt);
         collect_port_mappings[inpt]["reg_name"] = full_bank_name_with_ub;
         collect_port_mappings[inpt]["node_name"] = full_bank_name_with_ub;
+        bank_port_reg_names[bank_id][inpt] = full_bank_name_with_ub;
 
         //cout << "BUF Wire inpt: " << memDatainPort(options, config_mode, inpt_cnt) << " with " << pt2wire.at(inpt)->toString() << endl;
         def->connect(buf->sel(memDatainPort(options, config_mode, inpt_cnt)), pt2wire.at(inpt));
@@ -3784,6 +3785,7 @@ void UBuffer::wire_ubuf_IO(CodegenOptions& options,CoreIR::ModuleDef* def, map<s
         auto full_bank_name_with_ub = "ub_" + bank_name_str + "_garnet." + memDataoutPort(options, config_mode, outpt_cnt);
         collect_port_mappings[outpt]["reg_name"] = full_bank_name_with_ub;
         collect_port_mappings[outpt]["node_name"] = full_bank_name_with_ub;
+        bank_port_reg_names[bank_id][outpt] = full_bank_name_with_ub;
         cout << "WIRING PORTS: ub port name: " << outpt << " and coreirname: " << full_bank_name_with_ub << " with op_port: " << final_port_name_use << endl;
         def->connect(buf->sel(memDataoutPort(options, config_mode, outpt_cnt)), pt2wire.at(outpt));
       } else {
@@ -3804,6 +3806,18 @@ void UBuffer::wire_ubuf_IO(CodegenOptions& options,CoreIR::ModuleDef* def, map<s
           }
 
         } else if (config_mode == "pond" ) {
+          // 2026-10-08: the reader takes each token from one of these banks, through a mux
+          // whose select is a static-schedule controller. Dense ready-valid has no such merge:
+          // a PE fires only once every input holds a token. Unroll the reader over the banked
+          // dimension instead, so each bank has its own reader (matmul_tile ux=4: also unroll
+          // mul's pure definition and the output's tile x, GeneratorParam uall).
+          const char* drv = std::getenv("DENSE_READY_VALID");
+          if (drv && drv[0] == '1') {
+            cout << "RV ERROR " << name << ": pond read port " << outpt << " reads "
+                 << impl.outpt_to_bank.at(outpt).size() << " banks; dense ready-valid cannot merge "
+                 << "bank streams (no RV mux). Unroll the reader over the banked dimension." << endl;
+            assert(false);
+          }
           if (bank_id == impl.outpt_to_bank.at(outpt).size() - 1) {
             //last port directly connec to the wire
             def->connect(buf->sel(memDataoutPort(options, config_mode, outpt_cnt)),  pt2wire.at(outpt));
@@ -6344,6 +6358,9 @@ void UBuffer::generate_coreir_refactor(CodegenOptions& options,
       // Can actually get the
       cout << "IMPL TARG BUF INPUT PORT: " << impltb_input_port << endl;
       auto cpm_entry = collect_port_mappings[impltb_input_port];
+      if (bank_port_reg_names.count(bank_id) && bank_port_reg_names.at(bank_id).count(impltb_input_port)) {
+        cpm_entry["reg_name"] = bank_port_reg_names.at(bank_id).at(impltb_input_port);
+      }
       cout << "CPM ENTRY: " << cpm_entry["reg_name"] << endl;
       cout << "Putting this in config file: " << cpm_entry["reg_name"] << endl;
       capture_local_metadata["port_mappings"][impltb_input_port] = cpm_entry["reg_name"];
@@ -6352,6 +6369,9 @@ void UBuffer::generate_coreir_refactor(CodegenOptions& options,
       // Can actually get the
       cout << "IMPL TARG BUF OUTPUT PORT: " << impltb_output_port << endl;
       auto cpm_entry = collect_port_mappings[impltb_output_port];
+      if (bank_port_reg_names.count(bank_id) && bank_port_reg_names.at(bank_id).count(impltb_output_port)) {
+        cpm_entry["reg_name"] = bank_port_reg_names.at(bank_id).at(impltb_output_port);
+      }
       cout << "CPM ENTRY: " << cpm_entry["reg_name"] << endl;
       cout << "Putting this in config file: " << cpm_entry["reg_name"] << endl;
       capture_local_metadata["port_mappings"][impltb_output_port] = cpm_entry["reg_name"];
