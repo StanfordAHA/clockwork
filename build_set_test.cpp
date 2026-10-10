@@ -21028,7 +21028,10 @@ void compile_for_garnet_fetch2_mem(prog& prg,
   auto hw_sched = its(sched_map,
           prg.whole_iteration_domain());
   cout << "result schedule: " << str(hw_sched) << endl;
-  auto buffers_opt = build_buffers(prg, hw_sched);
+  // 2026-10-08: pass the schedule info like the single-port path does, so each
+  // compute input port gets its mapped PE pipeline slack (port_latencies). Without
+  // it every stencil tap of a static fw=2 line buffer arrives 0-2 cycles early.
+  auto buffers_opt = build_buffers(prg, hw_sched, sched);
   auto sched_max = lexmaxpt(range(hw_sched));
   cout << "Latency of application is: " << str((sched_max)) << endl;
 

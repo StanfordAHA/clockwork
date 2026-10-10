@@ -1494,6 +1494,27 @@ int get_sram_read_rate(GarnetImpl & hw_impl) {
 }
 
 
+// SRAM accesses per cycle a lowered lake bank needs: one access per fetch of each
+// SRAM write bundle (agg2sram) and read bundle (sram2tb), at its fetch-loop II. A
+// bundle is one vector port; its ports are the words of the vector (fetch_width of
+// them) and are accessed together, so count each bundle once.
+static pair<double, double> sram_access_rates(GarnetImpl & hw_impl) {
+    for (auto it: hw_impl.sub_component) {
+        if (contains(it.first, "sram")) {
+            UBuffer& sram = it.second;
+            auto rate = [&](const string& bd) {
+                string pt = pick(sram.port_bundles.at(bd));
+                return 1.0 / std::max(1, get_vector_fetch_loop_ii(sram.schedule.at(pt)));
+            };
+            double wr = 0, rd = 0;
+            for (auto bd : sram.get_in_bundles()) wr += rate(bd);
+            for (auto bd : sram.get_out_bundles()) rd += rate(bd);
+            return {wr, rd};
+        }
+    }
+    return {0.0, 0.0};
+}
+
 //New bank merging after vectorization
 void UBufferImpl::bank_merging_and_rewrite(CodegenOptions & options) {
 
@@ -1570,6 +1591,31 @@ void UBufferImpl::bank_merging_and_rewrite(CodegenOptions & options) {
   }
   bool is_dual_port = options.mem_hierarchy.at("mem").dual_port_sram;
 
+  // 2026-10-08: SRAM bandwidth of a merge group. Banks in a group hold the same data
+  // (same read domain): they share the write stream, and each brings its own reads.
+  // An SRAM port does one access per cycle -- a single-port SRAM carries the writes
+  // and every read, a dual-port one has a write port and a read port. A static
+  // schedule cannot exceed that (the sram2tb collision search then pushes a reader a
+  // whole frame early, e.g. a 3x3 line buffer on a single-port fw=2 tile), so such a
+  // group is not merged: each reader keeps its own copy of the data. Ready-valid
+  // compiles keep merging (the handshake stalls instead).
+  bool static_compile = !dense_rv_compile();
+  auto sram_bandwidth_ok = [&](const vector<int>& banks) {
+    if (!static_compile || banks.size() < 2) return true;
+    double wr = 0, rd = 0;
+    for (size_t i = 0; i < banks.size(); i++) {
+      auto r = sram_access_rates(lowering_info.at(banks.at(i)));
+      if (i == 0) wr = r.first;
+      rd += r.second;
+    }
+    const double eps = 1e-9;
+    bool ok = is_dual_port ? (wr <= 1 + eps && rd <= 1 + eps) : (wr + rd <= 1 + eps);
+    cout << "\tSRAM bandwidth of banks " << banks << ": write " << wr << " + read " << rd
+         << " accesses/cycle, " << (is_dual_port ? "dual" : "single") << "-port -> "
+         << (ok ? "merge" : "keep separate (duplicate data)") << endl;
+    return ok;
+  };
+
   // Check single_port constraints: if the target memory component is single-ported,
   // banks that have both readers and writers cannot be merged (they'd need simultaneous R+W)
   auto& single_port_map = options.mem_hierarchy.at("mem").single_port;
@@ -1587,7 +1633,8 @@ void UBufferImpl::bank_merging_and_rewrite(CodegenOptions & options) {
       auto bk_it = banks_tobe_merged.begin();
       while (true) {
         if(get_banks_inpts_num(merging_banks) > max_inpt ||
-          get_banks_outpts_num(merging_banks) > max_outpt) {
+          get_banks_outpts_num(merging_banks) > max_outpt ||
+          !sram_bandwidth_ok(merging_banks)) {
           auto last_bank = merging_banks.back();
           merging_banks.pop_back();
           //cout << merging_banks << endl;
