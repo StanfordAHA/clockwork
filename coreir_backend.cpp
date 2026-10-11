@@ -5790,8 +5790,9 @@ void disconnect_input_enable(Context* c, Module* top) {
 // already match (conv_3_3, gaussian, matmul); reuse buffers (explicit
 // [l, l, scalar] deps) are skipped. RTL-verified on harris (16x8 rv spec).
 // fw1 (lake_dp) banks name the same configs in2regfile_0 / regfile2out_k.
-static void rv_reframe_line_buffers(Module* top) {
-  if (!dense_rv_compile() || !top->hasDef()) return;
+static vector<int> rv_frame_F;   // set by map_memory; read by rv_align_tokens
+static vector<int> rv_reframe_line_buffers(Module* top) {
+  if (!dense_rv_compile() || !top->hasDef()) return {};
   auto def = top->getDef();
   std::set<long> io_lens;
   for (auto it : def->getInstances()) {
@@ -5834,7 +5835,7 @@ static void rv_reframe_line_buffers(Module* top) {
   }
   if (F.empty()) {
     cout << "RV reframe: no line-buffer bank on an input stream frame; nothing to do" << endl;
-    return;
+    return {};
   }
   for (auto it : def->getInstances()) {
     auto inst = it.second;
@@ -5876,6 +5877,90 @@ static void rv_reframe_line_buffers(Module* top) {
       inst->getMetaData()["config"] = c;
       cout << "RV reframe " << shrt << ": " << changed << " port configs -> frame ["
            << F[0] << ", " << F[1] << "]" << endl;
+    }
+  }
+  return F;
+}
+
+// 2026-10-08: dense-RV IO schedules in tokens. Every op of a dense RV stencil
+// pipeline fires once per token of the input frame F (rv_reframe_line_buffers),
+// but the IO tiles' schedules come out of the static scheduler in CYCLES, whose
+// row pitch P can exceed F[0] (camera_pipeline_2x2: 128-wide rows on a 129-cycle
+// pitch). The RV load DMA ignores cycle starts and the RV store DMA counts
+// tokens, so on the frame's grid (token = (cycle / P) * F[0] + cycle % P):
+//  - an input IO starting s cycles in is a delayed copy of the input (camera
+//    reads the same buffer at 0 / 129 / 1 cycles: the pixel, the pixel above,
+//    the pixel to the left) and must lead with L = token(s) filler tokens: the
+//    testbench writes its data L words in (tb_write_starting_addr) while the DMA
+//    reads from the unchanged start, so token k is element k - L;
+//  - an output IO's start and row stride become token counts.
+// The static offsets are stencil offsets (harris: 414 = 6 rows x 68 + 6, used
+// as a token index as-is, PASS), so the conversion is exact; it is the identity
+// when P == F[0]. Only 2-D streams on the frame's row pitch are touched.
+static void rv_tokenize_io_schedules(Module* top, const vector<int>& F) {
+  if (F.size() != 2 || !top->hasDef()) return;
+  auto def = top->getDef();
+  int P = 0;
+  for (auto it : def->getInstances()) {
+    if (!it.second->hasMetaData()) continue;
+    Json md = it.second->getMetaData();
+    if (!md.count("glb2out_0")) continue;
+    Json c = md["glb2out_0"];
+    if (!c.count("extent") || !c.count("cycle_stride") || c["extent"].size() != 2 ||
+        c["cycle_stride"].size() != 2) continue;
+    if (c["extent"][0].get<int>() != F[0] || c["extent"][1].get<int>() != F[1]) continue;
+    P = c["cycle_stride"][1].get<int>();
+    break;
+  }
+  if (P <= F[0]) {
+    // P == F[0], or 1-D input streams (P == 0): no row gaps, cycles are tokens already
+    cout << "RV IO tokens: input streams have no row gaps; IO schedules unchanged" << endl;
+    return;
+  }
+  auto token = [&](int cyc) { return (cyc / P) * F[0] + cyc % P; };
+  for (auto it : def->getInstances()) {
+    auto inst = it.second;
+    if (!inst->hasMetaData()) continue;
+    for (string key : {"glb2out_0", "in2glb_0"}) {
+      if (!inst->getMetaData().count(key)) continue;
+      Json c = inst->getMetaData()[key];
+      if (!c.count("cycle_starting_addr") || !c.count("cycle_stride") || c["cycle_stride"].size() != 2 ||
+          c["cycle_stride"][0].get<int>() != 1 || c["cycle_stride"][1].get<int>() != P) continue;
+      int s = c["cycle_starting_addr"][0].get<int>();
+      if (s < 0 || s % P >= F[0]) {
+        cout << "RV IO tokens: " << it.first << " " << key << " starts at cycle " << s
+             << ", outside the frame's rows; left in cycles" << endl;
+        continue;
+      }
+      int L = token(s);
+      if (key == "glb2out_0" && L > 0) {
+        // The testbench writes input data in 64-bit GLB beats from tb_write_starting_addr,
+        // so only whole beats of filler are realized (camera's 1-token lag on IO2 was
+        // silently 0). Emit the realized lag; rv_align_tokens aligns the remainder.
+        int wpb = 4;
+        int dw = cgra_data_width();
+        if (dw > 0 && dw <= 64 && 64 % dw == 0) wpb = 64 / dw;
+        int La = (L / wpb) * wpb;
+        if (La != L) {
+          cout << "RV IO tokens: " << it.first << " lag " << L << " -> " << La
+               << " (whole " << wpb << "-word GLB beats)" << endl;
+        }
+        L = La;
+      }
+      if (key == "glb2out_0") {
+        if (L > 0) {
+          if (!c.count("read_data_starting_addr")) continue;
+          c["tb_write_starting_addr"] = Json::array({c["read_data_starting_addr"][0].get<int>() + L});
+        }
+        c["cycle_starting_addr"] = Json::array({0});
+      } else {
+        c["cycle_starting_addr"] = Json::array({L});
+      }
+      c["cycle_stride"] = Json::array({1, F[0]});
+      inst->getMetaData()[key] = c;
+      cout << "RV IO tokens: " << it.first << " " << key << ": cycle " << s << " on pitch " << P
+           << " -> token " << L << (key == "glb2out_0" && L > 0 ? " (filler tokens before the data)" : "")
+           << ", row stride " << F[0] << endl;
     }
   }
 }
@@ -5923,7 +6008,9 @@ void map_memory(CodegenOptions& options, Module* top, map<string, UBuffer> & buf
   // c->runPasses({"pondsubstitutemetamapper"});
   c->addPass(new MapperPasses::RegfileSubstituteMetaMapper);
   c->runPasses({"regfilesubstitutemetamapper"});
-  rv_reframe_line_buffers(top);
+  auto frame = rv_reframe_line_buffers(top);
+  rv_frame_F = frame;
+  rv_tokenize_io_schedules(top, frame);
 
 }
 
@@ -6308,6 +6395,264 @@ void analyze_post_mapped_app_M1(CodegenOptions& options, prog& prg, map<string, 
   out << tab(2) << " aff_ctrl pe full: " << aff_ctrl_full << endl;
   out << tab(2) << " aff_func pe full: " << aff_func_full << endl;
   out << tab(2) << " mem:  " << mem << endl;
+}
+
+// 2026-10-10: dense-RV token alignment (session 1fa8a391). In a dense RV pipeline every op fires
+// once per frame token and its k-th firing combines the k-th token on each input, so for op C at
+// loop point i reading element e of buffer B (written by op W at loop point i_W(e)) the tap must
+// arrive exactly when C fires i. With base(op) = the token at which the op fires loop point
+// lin = 0 (lin(root, y, x) = y * F0 + x), the tap brings e at
+//   base(W) + lin(i_W(e)) + S
+// where S = the tap's structural delay (MEM read precursor set by rv_reframe_line_buffers, plus
+// the pre-filled d_regs on its shift-register path), and C needs it at base(C) + lin(i). So
+//   base(C) = max over C's taps of (base(W) + D + S),   D = lin(i_W(e)) - lin(i)   (constant),
+//   extra(tap) = base(C) - (base(W) + D + S)   -> pre-fill on the tap's consumer PE inputs.
+// Input ops start at their IO's filler lag (rv_tokenize_io_schedules); an output IO stores from
+// base(output op) + lin(first loop point). This replaces the per-buffer precursor_extra
+// remainder (consistent per buffer, not across a consumer's input buffers: camera r_gr's g_r taps
+// arrive one token after its g_gr / r_r taps). Only 2-D frame ops with uniform dependences are
+// aligned; everything else (ponds, reuse buffers, compact streams) is left alone.
+static int rv_lin(const vector<int>& v, int F0) {
+  return v.size() == 3 ? v[1] * F0 + v[2] : INT_MIN;
+}
+
+static vector<int> rv_point(isl_set* s) {
+  if (s == nullptr || empty(s)) return {};
+  return parse_pt(sample(s));
+}
+
+static map<string, int> rv_align_tokens(ModuleDef* def, map<string, UBuffer>& buffers,
+                                        const std::set<string>& dreg_bufs) {
+  map<string, int> extra;
+  if (!dense_rv_compile() || rv_frame_F.size() != 2) return extra;
+  if (getenv("RV_NO_ALIGN") != nullptr) {     // A/B audits: the pre-2026-10-10 behaviour
+    cout << "RV align: disabled (RV_NO_ALIGN)" << endl;
+    return extra;
+  }
+  const int F0 = rv_frame_F[0];
+  auto insts = def->getInstances();
+  // IO lags and output IOs, by op name ("io16in_<buf>_op_<op>_read_0", "io16_<buf>_op_<op>_write_0")
+  map<string, int> io_in_lag;
+  map<string, Instance*> io_out;
+  for (auto it : insts) {
+    if (!it.second->hasMetaData()) continue;
+    Json md = it.second->getMetaData();
+    string n = it.first;
+    auto p = n.find("_op_");
+    if (p == string::npos) continue;
+    if (md.count("glb2out_0")) {
+      auto q = n.rfind("_read_");
+      if (q == string::npos || q < p) continue;
+      Json c = md["glb2out_0"];
+      int L = 0;
+      if (c.count("tb_write_starting_addr") && c.count("read_data_starting_addr"))
+        L = c["tb_write_starting_addr"][0].get<int>() - c["read_data_starting_addr"][0].get<int>();
+      io_in_lag[n.substr(p + 1, q - p - 1)] = L;
+    } else if (md.count("in2glb_0")) {
+      auto q = n.rfind("_write_");
+      if (q == string::npos || q < p) continue;
+      io_out[n.substr(p + 1, q - p - 1)] = it.second;
+    }
+  }
+  // MEM read precursor (tokens) of a bank output wire "<buf>$<bank>.data_out_k"
+  auto mem_precursor = [&](const string& buf, const string& entry, int& S) -> bool {
+    string bank = buf + "$" + entry.substr(0, entry.find('.'));
+    if (!insts.count(bank) || !insts.at(bank)->hasMetaData()) return false;
+    Json md = insts.at(bank)->getMetaData();
+    if (!md.count("config")) return false;
+    Json c = md["config"];
+    if (!c.count("port_mappings") || !c.count("precursor_deltas")) return false;
+    for (auto& pm : c["port_mappings"].items()) {
+      if (pm.value().get<string>() != entry || !c["precursor_deltas"].count(pm.key())) continue;
+      int rows = 0, cols = 0;
+      for (auto lv : c["precursor_deltas"][pm.key()]) {
+        if (lv[0].get<int>() == 1) rows = lv[1].get<int>();
+        if (lv[0].get<int>() == 0) cols = lv[1].get<int>();
+      }
+      S = rows * F0 + cols;
+      return true;
+    }
+    return false;
+  };
+  auto driver_of = [&](const string& sink) -> string {
+    for (auto conn : def->getConnections()) {
+      string a = conn.first->toString(), b = conn.second->toString();
+      if (a == sink) return b;
+      if (b == sink) return a;
+    }
+    return "";
+  };
+  struct Tap { string buf, op, wop, why = "no writer port"; int D = 0, S = 0; bool ok = false; };
+  map<string, Tap> taps;                       // output port -> tap
+  map<string, vector<string>> op_taps;         // op -> its output ports
+  map<string, int> op_min_lin;                 // op -> lin(lexmin(domain))
+  std::set<string> bad_ops;                    // not a 2-D frame op / non-uniform tap
+  for (auto& bit : buffers) {
+    const string& bn = bit.first;
+    UBuffer& buf = bit.second;
+    for (auto pt : buf.get_in_ports()) {
+      if (!buf.domain.count(pt)) continue;
+      string op = name(buf.domain.at(pt));
+      if (num_dims(buf.domain.at(pt)) != 3) { bad_ops.insert(op); continue; }
+      op_min_lin[op] = rv_lin(rv_point(isl_set_lexmin(cpy(buf.domain.at(pt)))), F0);
+    }
+    for (auto p : buf.get_out_ports()) {
+      if (!buf.domain.count(p) || !buf.access_map.count(p)) continue;
+      Tap t; t.buf = bn; t.op = name(buf.domain.at(p));
+      op_taps[t.op].push_back(p);
+      if (num_dims(buf.domain.at(p)) != 3) { bad_ops.insert(t.op); t.why = "op not 2-D"; taps[p] = t; continue; }
+      op_min_lin[t.op] = rv_lin(rv_point(isl_set_lexmin(cpy(buf.domain.at(p)))), F0);
+      if (isl_union_map_n_map(buf.access_map.at(p)) != 1) { bad_ops.insert(t.op); t.why = "multi-space access"; taps[p] = t; continue; }
+      isl_map* rd = its(to_map(buf.access_map.at(p)), buf.domain.at(p));
+      bool found = false;
+      // A shift-register port's root is the exact writer port it taps; access maps alone
+      // can alias writers (camera demosaicked is split by channel: three writers per pixel).
+      vector<string> cand = buf.get_in_ports();
+      {
+        string r = p;
+        for (int guard = 0; guard < 1024 && buf.rv_sr_src.count(r); guard++) r = buf.rv_sr_src.at(r);
+        if (r != p && buf.isIn.count(r) && buf.isIn.at(r)) cand = {r};
+      }
+      // A MEM-served port reads its bank, whose writer is the port mapped to the bank's data_in.
+      if (cand.size() != 1 && buf.collect_port_mappings.count(p)) {
+        string e = buf.collect_port_mappings.at(p)["reg_name"];
+        string bank = bn + "$" + e.substr(0, e.find('.'));
+        if (e.find("data_out") != string::npos && insts.count(bank) && insts.at(bank)->hasMetaData()) {
+          Json bmd = insts.at(bank)->getMetaData();
+          vector<string> ws;
+          if (bmd.count("config") && bmd["config"].count("port_mappings")) {
+            for (auto& pm : bmd["config"]["port_mappings"].items()) {
+              if (pm.value().get<string>().find(".data_in") != string::npos &&
+                  buf.isIn.count(pm.key()) && buf.isIn.at(pm.key())) ws.push_back(pm.key());
+            }
+          }
+          if (ws.size() == 1) cand = ws;
+        }
+      }
+      int nmatch = 0;
+      for (auto w : buf.get_in_ports()) {
+        if (!buf.domain.count(w) || !buf.access_map.count(w) || num_dims(buf.domain.at(w)) != 3) continue;
+        if (isl_union_map_n_map(buf.access_map.at(w)) != 1) continue;
+        if (!empty(dot(rd, inv(its(to_map(buf.access_map.at(w)), buf.domain.at(w)))))) nmatch++;
+      }
+      if (nmatch > 1 && cand.size() != 1) { bad_ops.insert(t.op); t.why = "ambiguous writer"; taps[p] = t; continue; }
+      for (auto w : cand) {
+        if (!buf.domain.count(w) || !buf.access_map.count(w) || num_dims(buf.domain.at(w)) != 3) continue;
+        if (isl_union_map_n_map(buf.access_map.at(w)) != 1) continue;
+        isl_map* wr = its(to_map(buf.access_map.at(w)), buf.domain.at(w));
+        isl_map* rel = dot(rd, inv(wr));                 // reader point -> writer point(s)
+        if (empty(rel)) continue;
+        rel = set_domain_name(rel, "rv");
+        rel = set_range_name(rel, "rv");
+        isl_set* d = isl_map_deltas(rel);
+        if (isl_set_is_singleton(d) != isl_bool_true) { bad_ops.insert(t.op); t.why = "non-uniform: " + str(d); break; }
+        t.D = rv_lin(rv_point(d), F0);
+        t.wop = name(buf.domain.at(w));
+        found = true;
+        break;
+      }
+      if (!found) { taps[p] = t; continue; }
+      // structural delay: MEM precursor and/or pre-filled d_regs back to the root tap
+      string entry = buf.collect_port_mappings.count(p) ? buf.collect_port_mappings.at(p)["reg_name"] : "";
+      int S = 0;
+      bool sok = true;
+      if (entry.find("data_out") != string::npos) {
+        sok = mem_precursor(bn, entry, S);
+      } else if (entry.find("d_reg") != string::npos) {
+        string cur = bn + "$" + entry.substr(0, entry.rfind('.'));     // <buf>$d_reg__Uk$reg0
+        for (int guard = 0; guard < 4096; guard++) {
+          string reg = cur.substr(bn.size() + 1);
+          reg = reg.substr(0, reg.find('$'));
+          if (dreg_bufs.count(bn) && buf.extra_data_locations.count(reg)) S += buf.extra_data_locations.at(reg);
+          string drv = driver_of(cur + ".in");
+          if (drv.rfind(bn + "$d_reg", 0) == 0) { cur = drv.substr(0, drv.rfind('.')); continue; }
+          if (drv.find("data_out") != string::npos && drv.rfind(bn + "$", 0) == 0) {
+            int Sm = 0;
+            sok = mem_precursor(bn, drv.substr(bn.size() + 1), Sm);
+            S += Sm;
+          }
+          break;
+        }
+      }
+      t.S = S;
+      t.ok = sok;
+      if (!sok) t.why = "no MEM precursor for " + entry;
+      taps[p] = t;
+    }
+  }
+  // Writers with no taps that are not input ops produce constants (a reduction's init
+  // op: harris grad_x_unclamp, lgxx): always available, so their taps neither constrain
+  // the reader's base nor need a pre-fill.
+  std::set<string> const_ops;
+  for (auto& it : taps) {
+    const Tap& t = it.second;
+    if (t.ok && t.wop != "" && !op_taps.count(t.wop) && !io_in_lag.count(t.wop)) const_ops.insert(t.wop);
+  }
+  for (auto& op : const_ops) cout << "RV align: constant writer " << op << endl;
+  // op bases, in dependence order (fixpoint over the DAG)
+  map<string, int> base;
+  for (auto& it : io_in_lag) {
+    if (op_min_lin.count(it.first) && !bad_ops.count(it.first)) base[it.first] = it.second - op_min_lin.at(it.first);
+  }
+  bool progress = true;
+  while (progress) {
+    progress = false;
+    for (auto& it : op_taps) {
+      const string& op = it.first;
+      if (base.count(op) || bad_ops.count(op)) continue;
+      bool ready = true;
+      int b = INT_MIN;
+      for (auto p : it.second) {
+        const Tap& t = taps.at(p);
+        if (t.ok && const_ops.count(t.wop)) continue;
+        if (!t.ok || !base.count(t.wop)) { ready = false; break; }
+        b = std::max(b, base.at(t.wop) + t.D + t.S);
+      }
+      if (!ready || b == INT_MIN) continue;
+      base[op] = b;
+      progress = true;
+    }
+  }
+  for (auto& it : base) cout << "RV align: base " << it.first << " = " << it.second << endl;
+  for (auto& it : op_taps) {
+    if (base.count(it.first)) continue;
+    string why = bad_ops.count(it.first) ? "not a 2-D frame op with uniform taps" : "";
+    for (auto p : it.second) {
+      if (why != "") break;
+      const Tap& t = taps.at(p);
+      if (!t.ok) why = "tap " + p + ": " + t.why;
+      else if (!base.count(t.wop)) why = "tap " + p + ": writer " + t.wop + " has no base";
+    }
+    cout << "RV align: no base for " << it.first << " (" << why << ")" << endl;
+  }
+  for (auto& it : taps) {
+    const Tap& t = it.second;
+    if (t.ok && const_ops.count(t.wop)) continue;
+    if (!t.ok || !base.count(t.op) || !base.count(t.wop)) {
+      cout << "RV align: " << it.first << " not aligned: "
+           << (!t.ok ? t.why : (!base.count(t.op) ? "consumer " + t.op + " has no base" : "writer " + t.wop + " has no base"))
+           << endl;
+      continue;
+    }
+    int e = base.at(t.op) - (base.at(t.wop) + t.D + t.S);
+    cout << "RV align: " << it.first << " writer " << t.wop << " D " << t.D << " S " << t.S
+         << " -> extra " << e << endl;
+    if (e > 0) extra[it.first] = e;
+  }
+  // output IO start = token of the output op's first loop point
+  for (auto& it : io_out) {
+    if (!base.count(it.first) || !op_min_lin.count(it.first)) continue;
+    Json c = it.second->getMetaData()["in2glb_0"];
+    if (!c.count("cycle_stride") || c["cycle_stride"].size() != 2 || c["cycle_stride"][1].get<int>() != F0) continue;
+    int s = base.at(it.first) + op_min_lin.at(it.first);
+    int old = c["cycle_starting_addr"][0].get<int>();
+    if (s != old) {
+      c["cycle_starting_addr"] = Json::array({s});
+      it.second->getMetaData()["in2glb_0"] = c;
+    }
+    cout << "RV align: output " << it.first << " stores from token " << s << " (was " << old << ")" << endl;
+  }
+  return extra;
 }
 
 // 2026-10-09: dense-RV fixups on the design top clockwork hands to garnet
@@ -6696,8 +7041,19 @@ void generate_coreir_without_ctrl(CodegenOptions& options,
     }
   }
 
+  // Dense RV: rv_align_tokens decides every tap's PE pre-fill (see its comment); the walk
+  // below only places it. Buffers whose d_regs the precursor greedy filled keep that
+  // (the alignment counts it as the taps' structural delay).
+  map<string, int> rv_extra = rv_align_tokens(def, buffers, buffers_to_process);
+  std::set<std::string> walk_buffers = buffers_to_process;
+  for (auto& b : buffers) {
+    for (auto p : b.second.get_out_ports()) {
+      if (rv_extra.count(p)) walk_buffers.insert(b.first);
+    }
+  }
+
   cout << "Buffers to process..." << endl;
-  for(auto buf : buffers_to_process){
+  for(auto buf : walk_buffers){
     auto buf_name_exclude = buf;
     // Need to find all connections with this instance and instances outside of the instance
     cout << buf << endl;
@@ -6708,6 +7064,7 @@ void generate_coreir_without_ctrl(CodegenOptions& options,
     // Put the shift reg data in the fabric...
     cout << "EXTRA DATA LOCATIONS (2)" << endl;
     for(auto it : buf_object.extra_data_locations){
+      if (!buffers_to_process.count(buf)) break;
       cout << "Reg name: " << it.first << " has extra data: " << it.second << endl;
       auto reg_name = it.first;
       auto reg_inst_name = buf_name_exclude + "$" + reg_name + "$reg0";
@@ -6726,7 +7083,35 @@ void generate_coreir_without_ctrl(CodegenOptions& options,
       auto entry_point = buf_object.collect_port_mappings[output_port]["reg_name"];
       cout << "Output Port: " << output_port << endl;
       cout << "Entry point: " << entry_point << endl;
-      auto buf_instance_name = buf_name_exclude + "$" + entry_point;
+      // Dense RV: a port with no entry (a shift-register buffer that is only wires, e.g.
+      // camera demosaicked) reads its writer's value, and a copy writer (no PE) passes its own
+      // tap through: follow writer -> its tap port -> that port's entry until there is a wire.
+      string walk_buf = buf_name_exclude;
+      if (dense_rv_compile() && (entry_point == "" || entry_point == "NULL") &&
+          rv_extra.count(output_port) && rv_extra.at(output_port) > 0) {
+        string pb = buf, pp = output_port;
+        for (int guard = 0; guard < 16; guard++) {
+          UBuffer& ub = buffers.at(pb);
+          string r = pp;
+          for (int g2 = 0; g2 < 1024 && ub.rv_sr_src.count(r); g2++) r = ub.rv_sr_src.at(r);
+          if (!ub.isIn.count(r) || !ub.isIn.at(r) || !ub.domain.count(r)) break;
+          string wop = name(ub.domain.at(r));
+          string nb = "", np = "";
+          for (auto& b2 : buffers) {
+            for (auto q : b2.second.get_out_ports()) {
+              if (b2.second.domain.count(q) && name(b2.second.domain.at(q)) == wop) { nb = b2.first; np = q; break; }
+            }
+            if (np != "") break;
+          }
+          if (np == "") break;
+          string e2 = buffers.at(nb).collect_port_mappings.count(np) ? buffers.at(nb).collect_port_mappings.at(np)["reg_name"] : "";
+          cout << "RV pre-fill: " << output_port << " has no entry; writer " << wop << " taps " << np
+               << " (entry " << e2 << ")" << endl;
+          if (e2 != "" && e2 != "NULL") { walk_buf = nb; entry_point = e2; break; }
+          pb = nb; pp = np;
+        }
+      }
+      auto buf_instance_name = walk_buf + "$" + entry_point;
       auto curr_instance = buf_instance_name;
       // We found an input data port
       if(entry_point.find("data_in") != std::string::npos){
@@ -6753,7 +7138,9 @@ void generate_coreir_without_ctrl(CodegenOptions& options,
 
       // Need to know how much downstream data the port still needs
       cout << "Getting remaining data..." << endl;
-      auto remaining_data = buf_object.get_remaining_data(output_port, 0);
+      int remaining_data = dense_rv_compile() ?
+        (rv_extra.count(output_port) ? rv_extra.at(output_port) : 0) :
+        buf_object.get_remaining_data(output_port, 0);
       cout << "This much data left (before starting...): " << remaining_data << endl;
       // 2026-10-01 (dense RV): no fabric pre-fill from this walk. Its remaining
       // data is the column (level-0) part of the port's precursor, which the
@@ -6767,10 +7154,22 @@ void generate_coreir_without_ctrl(CodegenOptions& options,
       // 1-3 LSB errors on 3% of pixels). Ports siphoned straight off a writer
       // (entry = data_in) have static lag 0 and only a domain-index halo here
       // (unsharp gray / umax).
+      // 2026-10-10: in dense RV the walk places rv_align_tokens' extra instead (0 for
+      // every unsharp / harris tap), on this port's own consumer PEs only: the entry
+      // wire also feeds the other ports' consumers.
+      string rv_consumer_prefix = "";
+      vector<string> rv_rejected = {};
       if (dense_rv_compile() && remaining_data > 0) {
-        cout << "RV pre-fill: skipping " << remaining_data << " token(s) for "
-             << output_port << " (entry " << entry_point << ")" << endl;
-        remaining_data = 0;
+        string op = buf_object.domain.count(output_port) ? name(buf_object.domain.at(output_port)) : "";
+        if (op == "") {
+          cout << "RV pre-fill: no consumer op for " << output_port << "; " << remaining_data
+               << " token(s) not placed" << endl;
+          remaining_data = 0;
+        } else {
+          cout << "RV pre-fill: placing " << remaining_data << " token(s) for " << output_port
+               << " (entry " << entry_point << ") on " << op << " PEs" << endl;
+          rv_consumer_prefix = op + "$";
+        }
       }
       auto any_non_pe = false;
       int loop_tries = 1000;
@@ -6781,6 +7180,7 @@ void generate_coreir_without_ctrl(CodegenOptions& options,
           assert(false);
         }
         vector<string> all_downstream_connections = {};
+        rv_rejected.clear();
         for(auto connection : def->getConnections()){
           // If check if in first or second, if so, make sure other is out-of-instance PE
           auto use_first = true;
@@ -6834,12 +7234,66 @@ void generate_coreir_without_ctrl(CodegenOptions& options,
             // Don't add the connections that loop back...
           }
 
+          if (rv_consumer_prefix != "" && other_instance.rfind(rv_consumer_prefix, 0) != 0) {
+            cout << "RV pre-fill: " << other_instance << " is not a consumer of " << output_port << endl;
+            rv_rejected.push_back(other_instance);
+            continue;
+          }
+
           // Can add it now...
           cout << "Adding this downstream instance..." << other_instance << endl;
           all_downstream_connections.push_back(other_instance);
           cout << "Now there are this many downstream conns: " << all_downstream_connections.size() << endl;
           // curr_instance = other_instance;
 
+        }
+
+        if (rv_consumer_prefix != "" && all_downstream_connections.empty() && walk_buf == buf_name_exclude) {
+          // The consumer op has no PE of its own (a copy, e.g. camera demosaicked's
+          // interleave): its readers' PEs sit on the entry wire. They are the PEs there
+          // that belong to none of the ops of the other ports sharing this entry.
+          std::set<string> sibling_ops;
+          for (auto q : buf_object.get_out_ports()) {
+            if (q != output_port && buf_object.collect_port_mappings[q]["reg_name"] == entry_point &&
+                buf_object.domain.count(q)) {
+              sibling_ops.insert(name(buf_object.domain.at(q)));
+            }
+          }
+          for (auto inst : rv_rejected) {
+            if (inst.find("$inner_compute$") == string::npos) continue;
+            if (sibling_ops.count(inst.substr(0, inst.find("$")))) continue;
+            cout << "RV pre-fill: " << inst << " reads " << output_port << " through a copy op" << endl;
+            all_downstream_connections.push_back(inst);
+          }
+        }
+        if (rv_consumer_prefix != "" && all_downstream_connections.empty()) {
+          cout << "RV pre-fill: no " << rv_consumer_prefix << " PE on the entry wire of "
+               << output_port << "; " << remaining_data << " token(s) not placed" << endl;
+          break;
+        }
+        if (rv_consumer_prefix != "") {
+          // Every PE input that reads this tap gets the same pre-fill (the loop below stops
+          // at the first PE: camera g_r reads its g_gr x tap in 2 PEs).
+          int step = std::min(remaining_data, 2);
+          for (auto downstream_connection : all_downstream_connections) {
+            auto dot_ = downstream_connection.find_last_of('.');
+            string instance_name = downstream_connection.substr(0, dot_);
+            string pe_port = downstream_connection.substr(dot_ + 1);
+            auto downstream_inst = prg_instances.at(instance_name);
+            auto inst_metadata = downstream_inst->getMetaData();
+            inst_metadata["." + pe_port]["num_input_fifo"] = step;
+            if (inst_metadata["." + pe_port].count("num_output_fifo") == 0) {
+              inst_metadata["." + pe_port]["num_output_fifo"] = 0;
+            }
+            downstream_inst->setMetaData(inst_metadata);
+            cout << "RV pre-fill: " << step << " token(s) at " << downstream_connection << endl;
+          }
+          if (remaining_data > step) {
+            cout << "RV pre-fill: WARNING " << remaining_data - step << " token(s) beyond the PE FIFO depth not placed for "
+                 << output_port << endl;
+          }
+          remaining_data = 0;
+          continue;
         }
 
         // Make sure the size of downstream connections is still 1...

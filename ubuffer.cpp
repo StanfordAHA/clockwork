@@ -3948,6 +3948,7 @@ void UBuffer::generate_sreg_and_wire(CodegenOptions& options, UBufferImpl& impl,
 
   auto context = def->getContext();
   for (auto it: impl.get_shift_registered_ports()) {
+    rv_sr_src[it.first] = it.second.first;
     cout << "SHIFT REG INFO" << endl;
     cout << "dst: " << it.first << endl;
     cout << "src: " << it.second.first << endl;

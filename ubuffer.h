@@ -1141,6 +1141,9 @@ class UBuffer {
     map<string, vector<pair<int, int>>> precursor_extra;
     map<string, vector<pair<int, int>>> precursor_committed;
     map<string, int> extra_data_locations;
+    // Dense RV token alignment (coreir_backend rv_align_tokens): each shift-registered output
+    // port's source port (dst <- src), from generate_sreg_and_wire.
+    map<string, string> rv_sr_src;
 
 
 #ifdef COREIR
