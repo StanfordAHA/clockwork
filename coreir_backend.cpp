@@ -6310,6 +6310,201 @@ void analyze_post_mapped_app_M1(CodegenOptions& options, prog& prg, map<string, 
   out << tab(2) << " mem:  " << mem << endl;
 }
 
+// 2026-10-09: dense-RV fixups on the design top clockwork hands to garnet
+// (<app>_to_metamapper.json). They replace two pre-PnR hooks the RV accumulation
+// apps (matmul, resnet) needed.
+//  1. An RV accumulation pond (RV program, two writers) clears itself through
+//     data_in_pond_1, which consumes no data, but the init op's constant PE is
+//     still wired there; under ready-valid its tokens are never taken. Delete a
+//     constant PE (no data inputs) whose every sink is such a clear port, and the
+//     constants that only feed it.
+//  2. The RV GLB store DMA counts tokens: the i-th token is stored iff i is on
+//     the in2glb schedule. Clockwork emits that schedule in static cycles. A
+//     stream that carries exactly the output elements (a pond / accumulator final
+//     read: e.g. 256 tokens, static start 544, stride 32) never reaches the first
+//     scheduled index. If the streams feeding an output IO (traced back through
+//     PEs and registers to memory read ports and input IOs, token counts from their
+//     RV programs) carry exactly prod(extent) tokens, the schedule becomes start 0
+//     with dense strides. Frame-padded stencil outputs (more tokens than outputs)
+//     keep their schedule.
+static void rv_finalize_design_json(const string& path) {
+  if (!dense_rv_compile()) {
+    return;
+  }
+  Json d;
+  {
+    std::ifstream f(path);
+    if (!f) {
+      return;
+    }
+    f >> d;
+  }
+  string top = d["top"].get<string>();
+  top = top.substr(top.rfind('.') + 1);
+  Json& mod = d["namespaces"]["global"]["modules"][top];
+  Json& insts = mod["instances"];
+  auto kind = [&](const string& n) -> string {
+    if (!insts.count(n)) return "";
+    const Json& i = insts[n];
+    if (i.count("genref")) return i["genref"].get<string>();
+    if (i.count("modref")) return i["modref"].get<string>();
+    return "";
+  };
+  auto inst_of = [](const string& w) { return w.substr(0, w.find('.')); };
+  auto pin_of = [](const string& w) {
+    auto p = w.find('.');
+    return p == string::npos ? string("") : w.substr(p + 1);
+  };
+  map<string, vector<pair<string, string>>> peers;   // instance -> (own pin, other end)
+  for (auto& c : mod["connections"]) {
+    string a = c[0].get<string>(), b = c[1].get<string>();
+    peers[inst_of(a)].push_back({pin_of(a), b});
+    peers[inst_of(b)].push_back({pin_of(b), a});
+  }
+  auto is_const = [&](const string& n) { string k = kind(n); return k == "coreir.const" || k == "corebit.const"; };
+  auto is_pe_data_in = [](const string& pin) { return pin.rfind("data", 0) == 0 || pin.rfind("bit", 0) == 0; };
+  bool changed = false;
+
+  // 1. init PEs of RV accumulation ponds
+  auto clear_port = [&](const string& w) {
+    string n = inst_of(w);
+    if (kind(n) != "cgralib.Pond" || pin_of(w) != "data_in_pond_1") return false;
+    const Json& md = insts[n].count("metadata") ? insts[n]["metadata"] : Json::object();
+    return md.count("config") && md["config"].count("dep_values") && md["config"].count("in2regfile_1");
+  };
+  std::set<string> drop;
+  for (auto& it : insts.items()) {
+    string n = it.key();
+    if (kind(n) != "global.PE") continue;
+    bool feeds = false, only_clear = true, has_data_in = false;
+    for (auto& pp : peers[n]) {
+      if (pp.first.rfind("O", 0) == 0) {
+        feeds = true;
+        only_clear = only_clear && clear_port(pp.second);
+      } else if (is_pe_data_in(pp.first) && !is_const(inst_of(pp.second))) {
+        has_data_in = true;
+      }
+    }
+    if (feeds && only_clear && !has_data_in) {
+      drop.insert(n);
+    }
+  }
+  std::set<string> drop_consts;
+  for (auto& n : drop) {
+    for (auto& pp : peers[n]) {
+      string src = inst_of(pp.second);
+      if (!is_const(src)) continue;
+      bool exclusive = true;
+      for (auto& q : peers[src]) {
+        exclusive = exclusive && inst_of(q.second) == n;
+      }
+      if (exclusive) drop_consts.insert(src);
+    }
+  }
+  drop.insert(drop_consts.begin(), drop_consts.end());
+  if (!drop.empty()) {
+    Json kept = Json::array();
+    for (auto& c : mod["connections"]) {
+      if (!drop.count(inst_of(c[0].get<string>())) && !drop.count(inst_of(c[1].get<string>()))) {
+        kept.push_back(c);
+      }
+    }
+    mod["connections"] = kept;
+    for (auto& n : drop) {
+      insts.erase(n);
+      cout << "RV design: dropped " << n << " (drives only RV accumulation pond clear ports)" << endl;
+    }
+    peers.clear();
+    for (auto& c : mod["connections"]) {
+      string a = c[0].get<string>(), b = c[1].get<string>();
+      peers[inst_of(a)].push_back({pin_of(a), b});
+      peers[inst_of(b)].push_back({pin_of(b), a});
+    }
+    changed = true;
+  }
+
+  // 2. compact output streams
+  // token count of a source endpoint (memory read port or input IO), -1 if unknown
+  auto source_tokens = [&](const string& w) -> long {
+    string n = inst_of(w), pin = pin_of(w), k = kind(n);
+    const Json& md = insts[n].count("metadata") ? insts[n]["metadata"] : Json::object();
+    if (k == "global.IO") {
+      if (!md.count("glb2out_0") || !md["glb2out_0"].count("extent")) return -1;
+      long t = 1;
+      for (auto& e : md["glb2out_0"]["extent"]) t *= e.get<long>();
+      return t;
+    }
+    if (!md.count("config") || !md["config"].count("port_mappings") || !md["config"].count("domain")) return -1;
+    string shrt = n.substr(n.rfind('$') + 1) + "." + pin;
+    for (auto& pm : md["config"]["port_mappings"].items()) {
+      if (!pm.value().is_string() || pm.value().get<string>() != shrt) continue;
+      if (!md["config"]["domain"].count(pm.key())) return -1;
+      long t = 1;
+      for (auto& e : md["config"]["domain"][pm.key()]["extents"]) t *= e.get<long>();
+      return t;
+    }
+    return -1;
+  };
+  for (auto& it : insts.items()) {
+    string io = it.key();
+    if (kind(io) != "global.IO" || !it.value().count("metadata") || !it.value()["metadata"].count("in2glb_0")) continue;
+    Json& sched = it.value()["metadata"]["in2glb_0"];
+    if (!sched.count("extent") || !sched.count("cycle_stride") || !sched.count("cycle_starting_addr")) continue;
+    // trace back from the IO's fabric input
+    vector<string> todo, sources;
+    std::set<string> seen;
+    bool unknown = false;
+    for (auto& pp : peers[io]) {
+      if (pp.first == "in") todo.push_back(pp.second);
+    }
+    while (!todo.empty() && !unknown) {
+      string w = todo.back();
+      todo.pop_back();
+      if (!seen.insert(w).second) continue;
+      string n = inst_of(w), pin = pin_of(w), k = kind(n);
+      if ((k == "cgralib.Mem" || k == "cgralib.Pond") && pin.rfind("data_out", 0) == 0) {
+        sources.push_back(w);
+      } else if (k == "global.IO" && pin == "out") {
+        sources.push_back(w);
+      } else if (k == "global.PE" && pin.rfind("O", 0) == 0) {
+        for (auto& pp : peers[n]) {
+          if (is_pe_data_in(pp.first) && !is_const(inst_of(pp.second))) todo.push_back(pp.second);
+        }
+      } else if ((k == "coreir.reg" || k == "corebit.reg") && pin == "out") {
+        for (auto& pp : peers[n]) {
+          if (pp.first == "in") todo.push_back(pp.second);
+        }
+      } else if (!is_const(n)) {
+        unknown = true;
+      }
+    }
+    long n_out = 1;
+    vector<int> dense;
+    for (auto& e : sched["extent"]) {
+      dense.push_back((int) n_out);
+      n_out *= e.get<long>();
+    }
+    std::set<long> counts;
+    for (auto& w : sources) counts.insert(source_tokens(w));
+    if (unknown || sources.empty() || counts.size() != 1 || *counts.begin() != n_out) {
+      continue;
+    }
+    if (sched["cycle_starting_addr"] == Json::array({0}) && sched["cycle_stride"] == Json(dense)) {
+      continue;
+    }
+    cout << "RV design: " << io << " in2glb_0: " << n_out << " tokens = outputs (compact stream); start "
+         << sched["cycle_starting_addr"] << " stride " << sched["cycle_stride"] << " -> [0] " << Json(dense) << endl;
+    sched["cycle_starting_addr"] = Json::array({0});
+    sched["cycle_stride"] = dense;
+    changed = true;
+  }
+
+  if (changed) {
+    std::ofstream f(path);
+    f << d.dump();
+  }
+}
+
 void analyze_post_mapped_app_emit_to_file(CodegenOptions& options, prog& prg, map<string, UBuffer>& buffers, Module* gmod) {
   //count_post_mapped_memory_use(gmod);
   //count_post_mapped_memory_accesses(gmod);
@@ -6778,6 +6973,7 @@ void generate_coreir_without_ctrl(CodegenOptions& options,
     cout << "Could not save ubuffer coreir" << endl;
     context->die();
   }
+  rv_finalize_design_json(options.dir + prg.name + "_to_metamapper.json");
   cout << "AFTER PASSES" << endl;
 
   deleteContext(context);
