@@ -4319,6 +4319,10 @@ struct RVPondAccum {
   // static port times of the first pixel (writes: when the write is issued)
   // and the smallest pixel-to-pixel step (static_pond_keeps_pixel_loops)
   int t_init_last = 0, t_upd_first = 0, t_upd_last = 0, t_init = 0, t_final = 0, t_final_last = 0, step = 0;
+  // 2026-10-11: per accumulator address (min over the tile pixels; = the
+  // aggregate gaps for a scalar accumulator): final read - last update write,
+  // and the next pixel's (tile's) init - final read
+  int slack_upd_final = 0, slack_final_init = 0;
 };
 
 int rv_pond_dims();
@@ -4646,6 +4650,22 @@ static bool rv_pond_accumulation(UBuffer& buf, RVPondAccum& pa) {
   pa.t_final = t_final;
   pa.t_final_last = t_final_last;
   pa.step = step;
+  // Per address: all ports address a tile pixel identically (checked above), so
+  // each gap is affine in the tile-pixel offsets q_j in [0, ext_j - 1] and its
+  // minimum is at a corner.
+  {
+    int t_upd_w_last_red = first_time(pa.w_upd) + span(pa.w_upd, dp + 1, du, true);
+    pa.slack_upd_final = first_time(pa.r_final) - t_upd_w_last_red;
+    pa.slack_final_init = t_init + step - first_time(pa.r_final);
+    for (int j = 0; j < nt; j++) {
+      int e_f = int_coeff(sched_aff(pa.r_final), ni - j);
+      int e_i = int_coeff(sched_aff(pa.w_init), ni - j);
+      int e_u = int_coeff(sched_aff(pa.w_upd), nu - j);
+      int span_j = pix_ex.at(ni - j) - 1;
+      pa.slack_upd_final += min(0, (e_f - e_u) * span_j);
+      pa.slack_final_init += min(0, (e_i - e_f) * span_j);
+    }
+  }
   int n_tile_pixels = 1;
   for (int j = 0; j < nt; j++) {
     n_tile_pixels *= pix_ex.at(ni - j);
@@ -4685,7 +4705,11 @@ int rv_pond_dims() {
 //   init + L <= first update read, last update write + L <= final read,
 //   final read <= next pixel's init (a read sees the old value in the cycle of a write)
 // so one address serves every pixel and no two writes share a cycle.
-// Scalar accumulators only (a static tiled accumulator is untested).
+// 2026-10-11: also TILE accumulators (matmul_tile red_outer=1): the next tile's
+// init may start before this tile's last final read as long as, per address,
+// final read <= that address's re-init and last update write + L <= final read
+// (RVPondAccum slack_*), and the next tile's inits start after this tile's last
+// update write (the static spec pond's two writers share one memory write port).
 static bool static_pond_keeps_pixel_loops(UBuffer& buf) {
   auto pc = loaded_regfile_collateral();
   if (!pc) {
@@ -4700,21 +4724,22 @@ static bool static_pond_keeps_pixel_loops(UBuffer& buf) {
     cout << "Static pond " << buf.name << ": restarted per pixel (" << why << ")" << endl;
     return false;
   };
-  if (pa.n_tpix != 0) {
-    return fail("tiled accumulator");
+  if (pa.n_pix + pa.n_red + pa.n_tpix > pc->iteration_level) {
+    return fail(str(pa.n_pix + pa.n_red + pa.n_tpix) + " loops > pond iteration_level " + str(pc->iteration_level));
   }
-  if (pa.n_pix + pa.n_red > pc->iteration_level) {
-    return fail(str(pa.n_pix + pa.n_red) + " loops > pond iteration_level " + str(pc->iteration_level));
+  if (pa.n_tpix != 0 && !(pa.t_upd_last < pa.t_init + pa.step)) {
+    return fail("the next tile's init (" + str(pa.t_init + pa.step) + ") overlaps this tile's update writes (last " +
+                str(pa.t_upd_last) + ") on the shared write port");
   }
-  if (!(pa.t_init_last + L <= pa.t_upd_first && pa.t_upd_last + L <= pa.t_final &&
-        pa.t_final_last <= pa.t_init + pa.step)) {
+  if (!(pa.t_init_last + L <= pa.t_upd_first && pa.slack_upd_final >= L && pa.slack_final_init >= 0)) {
     return fail("schedule init " + str(pa.t_init) + ".." + str(pa.t_init_last) + ", updates " +
                 str(pa.t_upd_first) + ".." + str(pa.t_upd_last) + ", final " + str(pa.t_final) + ".." +
                 str(pa.t_final_last) + ", pixel step " + str(pa.step) +
-                " does not order init -> updates -> final read -> next init with store latency " + str(L));
+                " (per address: final - last update " + str(pa.slack_upd_final) + ", next init - final " +
+                str(pa.slack_final_init) + ") does not order init -> updates -> final read -> next init with store latency " + str(L));
   }
-  cout << "Static pond " << buf.name << ": accumulation pond keeps its " << pa.n_pix
-       << " pixel loop(s) (no per-pixel flush controller)" << endl;
+  cout << "Static pond " << buf.name << ": " << (pa.n_tpix ? "tiled " : "") << "accumulation pond keeps its " << pa.n_pix
+       << (pa.n_tpix ? " tile" : " pixel") << " loop(s) (no per-pixel flush controller)" << endl;
   return true;
 }
 
