@@ -58,6 +58,10 @@ std::string vanilla_c_pixel_type_string(const int w) {
     return "uint32_t";
   }
 
+  if (w == 64) {
+    return "uint64_t";
+  }
+
   cout << "Error: No primitive C type for width: " << w << endl;
   assert(false);
 }

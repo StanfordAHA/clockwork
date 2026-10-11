@@ -672,6 +672,8 @@ struct mem_access_cnt {
 LakeCollateral create_single_port_wide_fetch_memory(int fetch_width, int capacity, int SIPO_num);
 LakeCollateral create_dual_port_memory(int capacity);
 LakeCollateral load_lake_collateral_from_json(const std::string& filepath);
+// CGRA data word width in bits: the MEM collateral's data_width (the lake spec's), else 16
+int cgra_data_width();
 
 // 2026-10: the PE-tile pond's lake collateral (LAKE_COLLATERAL_JSON_REGFILE), or
 // nullptr when the regfile level uses the built-in preset. Recorded by

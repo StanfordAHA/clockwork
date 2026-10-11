@@ -3,7 +3,9 @@
 #include "prog.h"
 #include "codegen.h"
 
-static int DATAPATH_WIDTH = 16;
+// CGRA data word width: the lake collateral's data_width (options.cpp), default 16
+int cgra_data_width();
+static int DATAPATH_WIDTH = cgra_data_width();
 static int CONTROLPATH_WIDTH = 16;
 
 void generate_fsm(

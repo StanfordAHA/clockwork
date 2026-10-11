@@ -192,6 +192,26 @@ void CodegenOptions::load_memory_hierarchy_from_file(const std::string& level, c
     mem_hierarchy[level] = lc;
 }
 
+int cgra_data_width() {
+    // The CGRA data word width is the lake spec's data_width, which its MEM collateral
+    // carries (LAKE_COLLATERAL_JSON_MEM, as `aha map` sets it). 16 without one.
+    // Cached in a function-local static: DATAPATH_WIDTH is initialized from it during
+    // static initialization of every translation unit.
+    static const int width = [] {
+        const char* path = std::getenv("LAKE_COLLATERAL_JSON_MEM");
+        if (!path || !*path) return 16;
+        std::ifstream fin(path);
+        if (!fin.is_open()) {
+            std::cerr << "ERROR: cannot read LAKE_COLLATERAL_JSON_MEM=" << path << std::endl;
+            std::abort();
+        }
+        nlohmann::json j;
+        fin >> j;
+        return j.value("data_width", 16);
+    }();
+    return width;
+}
+
 LakeCollateral load_lake_collateral_from_json(const std::string& filepath) {
     std::ifstream fin(filepath);
     assert(fin.is_open() && ("Failed to open lake collateral JSON: " + filepath).c_str());

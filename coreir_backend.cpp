@@ -4283,10 +4283,10 @@ typedef struct {
 void getAllIOPaths(Wireable* w, IOpaths& paths) {
   Type* t = w->getType();
   if (auto at = dyn_cast<ArrayType>(t)) {
-    if (at->getLen()==16 && isa<BitType>(at->getElemType())) {
+    if (at->getLen()==DATAPATH_WIDTH && isa<BitType>(at->getElemType())) {
       paths.IO16.push_back(w->getSelectPath());
     }
-    else if (at->getLen() == 16 && isa<BitInType>(at->getElemType())) {
+    else if (at->getLen() == DATAPATH_WIDTH && isa<BitInType>(at->getElemType())) {
       paths.IO16in.push_back(w->getSelectPath());
     }
     else {
@@ -4358,7 +4358,7 @@ class GetGLBConfig: public CoreIR::InstanceGraphPass {
 void addIOsWithGLBConfig(Context* c, Module* top, map<string, UBuffer>& buffers, GetGLBConfig* glb_metadata) {
   ModuleDef* mdef = top->getDef();
 
-  Values aWidth({{"width",Const::make(c,16)}});
+  Values aWidth({{"width",Const::make(c,DATAPATH_WIDTH)}});
   IOpaths iopaths;
   getAllIOPaths(mdef->getInterface(), iopaths);
   Instance* pt = addPassthrough(mdef->getInterface(),"_self");
@@ -4438,7 +4438,7 @@ void addIOsWithGLBConfigMetaMapper(Context* c, Module* top, map<string, UBuffer>
   if (!loadHeader(c, "io_header.json", loaded)) {c->die();}
   vector<Module*> loaded_bit;
   if (!loadHeader(c, "bit_io_header.json", loaded_bit)) {c->die();}
-  Values aWidth({{"width",Const::make(c,16)}});
+  Values aWidth({{"width",Const::make(c,DATAPATH_WIDTH)}});
   IOpaths iopaths;
   getAllIOPaths(mdef->getInterface(), iopaths);
   Instance* pt = addPassthrough(mdef->getInterface(),"_self");
@@ -4528,7 +4528,7 @@ void addIOsWithGLBConfigMetaMapper(Context* c, Module* top, map<string, UBuffer>
 void addIOs(Context* c, Module* top) {
   ModuleDef* mdef = top->getDef();
 
-  Values aWidth({{"width",Const::make(c,16)}});
+  Values aWidth({{"width",Const::make(c,DATAPATH_WIDTH)}});
   IOpaths iopaths;
   getAllIOPaths(mdef->getInterface(), iopaths);
   Instance* pt = addPassthrough(mdef->getInterface(),"_self");
@@ -4752,7 +4752,7 @@ bool runOnInstance(Instance* inst) {
        //TODO put this into a function
        auto* g = context->getGenerator("cgralib.Mem_amber");
        CoreIR::Values genargs = {
-         {"width", CoreIR::Const::make(context, 16)},
+         {"width", CoreIR::Const::make(context, DATAPATH_WIDTH)},
          {"num_inputs", CoreIR::Const::make(context, 0)},
          {"num_outputs", CoreIR::Const::make(context, 0)},
          {"has_stencil_valid", CoreIR::Const::make(context, true)},
@@ -4821,7 +4821,7 @@ bool runOnInstance(Instance* inst) {
            //TODO put this into a function
            auto* g = context->getGenerator("cgralib.Mem_amber");
            CoreIR::Values genargs = {
-             {"width", CoreIR::Const::make(context, 16)},
+             {"width", CoreIR::Const::make(context, DATAPATH_WIDTH)},
              {"num_inputs", CoreIR::Const::make(context, 0)},
              {"num_outputs", CoreIR::Const::make(context, 0)},
              {"has_stencil_valid", CoreIR::Const::make(context, true)},
@@ -5039,7 +5039,7 @@ bool InitMove(Instance* cnst) {
       {"mode", CoreIR::Const::make(c, "lake")}
   };
   CoreIR::Values genargs = {
-    {"width", CoreIR::Const::make(c, 16)},
+    {"width", CoreIR::Const::make(c, DATAPATH_WIDTH)},
     {"is_rom", CoreIR::Const::make(c, true)},
     {"num_inputs", CoreIR::Const::make(c, 1)},
     {"num_outputs", CoreIR::Const::make(c, 1)},
@@ -5287,7 +5287,7 @@ bool MemtileReplaceMetaMapper(Instance* cnst) {
   {"has_chain_en", Const::make(c, false)},
   {"num_inputs", Const::make(c, num_inputs)},
   {"num_outputs", Const::make(c, num_outputs)},
-  {"width", Const::make(c, 16)}});
+  {"width", Const::make(c, DATAPATH_WIDTH)}});
 
   auto config_file = cnst->getMetaData()["config"];
   auto init = cnst->getMetaData()["init"];
@@ -5503,7 +5503,7 @@ bool RegfileReplaceMetaMapper(Instance* cnst) {
   Values genargs({
   {"num_inputs", Const::make(c, 2)},
   {"num_outputs", Const::make(c, 2)},
-  {"width", Const::make(c, 16)}});
+  {"width", Const::make(c, DATAPATH_WIDTH)}});
 
   auto config_file = cnst->getMetaData()["config"];
   CoreIR::Values modargs = {
@@ -5586,7 +5586,7 @@ bool RomReplaceMetaMapper(Instance* cnst) {
   {"has_chain_en", Const::make(c, false)},
   {"num_inputs", Const::make(c, 2)},
   {"num_outputs", Const::make(c, 2)},
-  {"width", Const::make(c, 16)}});
+  {"width", Const::make(c, DATAPATH_WIDTH)}});
 
   //auto config_file = cnst->getMetaData()["config"];
   auto realgenargs = cnst->getModuleRef()->getGenArgs();
