@@ -12022,8 +12022,112 @@ bool pad_range_one_vec_dim(map<int, int> & dim2denom,
     return pad_zero_iteration;
 }
 
-  pair<isl_map*, isl_map*> get_vectorized_read_simplified(isl_map* acc_0, isl_map* sched, map<string, isl_map*> sched_record_map,
-          int fetch_width, int tb_capacity, int addr_dim, int& vectorized_dim, bool is_dual_port) {
+  // Points of {time, word coordinates...} for a pair of maps with the same domain, as flat vectors.
+  static isl_stat tb_collect_point(isl_point* pt, void* user) {
+    auto* out = (vector<vector<long long> >*) user;
+    isl_space* sp = isl_point_get_space(pt);
+    int n = isl_space_dim(sp, isl_dim_set);
+    isl_space_free(sp);
+    vector<long long> v;
+    for (int i = 0; i < n; i++) {
+      isl_val* c = isl_point_get_coordinate_val(pt, isl_dim_set, i);
+      v.push_back(isl_val_get_num_si(c));
+      isl_val_free(c);
+    }
+    isl_point_free(pt);
+    out->push_back(v);
+    return isl_stat_ok;
+  }
+
+  static bool tb_enumerate(isl_map* time, isl_map* word, vector<vector<long long> >& out) {
+    isl_map* t = cpy(time);
+    isl_map* w = cpy(word);
+    t = isl_map_intersect_domain(t, isl_map_domain(cpy(w)));
+    w = isl_map_intersect_domain(w, isl_map_domain(cpy(t)));
+    if (num_in_dims(t) != num_in_dims(w)) return false;
+    int n_in = num_in_dims(t);
+    isl_map* both = isl_map_range_product(t, w);
+    // wrap (keep the iteration dims) so the points are enumerated per iteration, without existentials
+    isl_set* pts = isl_map_wrap(both);
+    vector<vector<long long> > raw;
+    isl_set_foreach_point(pts, tb_collect_point, &raw);
+    for (auto& v : raw) {
+      out.push_back(vector<long long>(v.begin() + n_in, v.end()));
+    }
+    isl_set_free(pts);
+    return true;
+  }
+
+  // Can a TB of tb_words vectors serve the reads (sched: iteration -> time, rd_word: iteration -> word)
+  // from the fetches (fetch_sched: fetch iteration -> time, fetch_word: fetch iteration -> word)?
+  // A fetched vector is visible tb_vis cycles after its fetch, is read until its last reader, and a
+  // vector that becomes visible overwrites a slot, so at most tb_words vectors may be live at any time
+  // (any slot allocation needs that much). Returns false and sets max_live / why if not.
+  bool tb_fetch_feasible(isl_map* sched, isl_map* rd_word, isl_map* fetch_sched, isl_map* fetch_word,
+          int tb_words, int tb_vis, long long max_points, int& max_live, string& why) {
+    vector<vector<long long> > reads, fetches;
+    max_live = 0;
+    if (!tb_enumerate(sched, rd_word, reads) || !tb_enumerate(fetch_sched, fetch_word, fetches)) {
+      why = "domain arity mismatch";
+      return true;
+    }
+    if ((long long) (reads.size() + fetches.size()) > max_points || reads.empty() || fetches.empty()) {
+      why = "skipped (size)";
+      return true;
+    }
+    if (reads[0].size() != fetches[0].size()) {
+      why = "word arity mismatch";
+      return true;
+    }
+    // vis time of each fetch, grouped by word
+    map<vector<long long>, vector<long long> > fetch_vis;
+    for (auto& f : fetches) {
+      fetch_vis[vector<long long>(f.begin() + 1, f.end())].push_back(f[0] + tb_vis);
+    }
+    for (auto& it : fetch_vis) std::sort(it.second.begin(), it.second.end());
+    // last read time served by each (word, fetch)
+    map<pair<vector<long long>, long long>, long long> last_use;
+    int missing = 0;
+    for (auto& r : reads) {
+      vector<long long> w(r.begin() + 1, r.end());
+      auto fi = fetch_vis.find(w);
+      if (fi == fetch_vis.end()) { missing++; continue; }
+      auto& vv = fi->second;
+      auto ub = std::upper_bound(vv.begin(), vv.end(), r[0]);
+      if (ub == vv.begin()) { missing++; continue; }
+      long long v = *(ub - 1);
+      auto key = make_pair(w, v);
+      auto li = last_use.find(key);
+      if (li == last_use.end() || li->second < r[0]) last_use[key] = r[0];
+    }
+    if (missing) {
+      why = "reads with no visible fetch: " + str(missing);
+      return true;
+    }
+    // sweep: +1 at visible time, -1 just after the last use
+    vector<pair<long long, int> > ev;
+    for (auto& it : fetch_vis) {
+      for (auto v : it.second) {
+        auto li = last_use.find(make_pair(it.first, v));
+        long long end = (li == last_use.end()) ? v : li->second;
+        ev.push_back(make_pair(v, 1));
+        ev.push_back(make_pair(end + 1, -1));
+      }
+    }
+    std::sort(ev.begin(), ev.end(), [](const pair<long long, int>& a, const pair<long long, int>& b) {
+        return a.first != b.first ? a.first < b.first : a.second < b.second; });
+    int live = 0;
+    for (auto& e : ev) {
+      live += e.second;
+      max_live = std::max(max_live, live);
+    }
+    why = "ok";
+    return max_live <= tb_words;
+  }
+
+  static pair<isl_map*, isl_map*> get_vectorized_read_simplified_impl(isl_map* acc_0, isl_map* sched, map<string, isl_map*> sched_record_map,
+          int fetch_width, int tb_capacity, int addr_dim, int& vectorized_dim, bool is_dual_port,
+          bool force_refetch, bool check_tb, bool* tb_infeasible) {
 
     isl_ctx* ctx = ::ctx(acc_0);
 
@@ -12071,7 +12175,7 @@ bool pad_range_one_vec_dim(map<int, int> & dim2denom,
     //Force it to be the inner most dimension
 
     int data_btw_fetch = card_in_dim(cpy(acc_0), innermost_stripmining_dim);
-    if (data_btw_fetch > tb_capacity) {
+    if (data_btw_fetch > tb_capacity || force_refetch) {
       vectorized_dim = num_in_dims(acc_vec_rem) - 1;
     }
     cout << "Vectorization dimension: " << vectorized_dim << endl;
@@ -12152,7 +12256,37 @@ bool pad_range_one_vec_dim(map<int, int> & dim2denom,
 
     cout << "final schedule: " << str(final_sched) << endl;
     cout << "final access: " << str(acc_vec_rem) << endl;
+
+    if (check_tb && tb_infeasible != nullptr) {
+      // TB capacity check: the words live between a fetch and its last read must fit the TB.
+      int max_live = 0;
+      string why;
+      int tb_words = std::max(1, tb_capacity / fetch_width);
+      bool ok = tb_fetch_feasible(sched, acc_slice, final_sched, acc_vec_rem, tb_words, 2, 400000, max_live, why);
+      cout << "TBCHK vectorized_dim=" << vectorized_dim << (force_refetch ? " (refetch)" : "") << " max live words=" << max_live
+           << " TB words=" << tb_words << " (" << why << ")" << (ok ? "" : "  -> TB too small") << endl;
+      *tb_infeasible = !ok;
+    }
     return make_pair(acc_vec_rem, final_sched);
+  }
+
+  pair<isl_map*, isl_map*> get_vectorized_read_simplified(isl_map* acc_0, isl_map* sched, map<string, isl_map*> sched_record_map,
+          int fetch_width, int tb_capacity, int addr_dim, int& vectorized_dim, bool is_dual_port) {
+    bool infeasible = false;
+    auto first = get_vectorized_read_simplified_impl(acc_0, sched, sched_record_map, fetch_width, tb_capacity,
+            addr_dim, vectorized_dim, is_dual_port, false, !dense_rv_compile(), &infeasible);
+    if (!infeasible || getenv("TB_NO_REFETCH") != nullptr) {
+      return first;
+    }
+    // The fetched vectors do not fit the TB: fetch the vector again for each use (innermost loop).
+    int dim2 = 0;
+    bool still_bad = false;
+    auto second = get_vectorized_read_simplified_impl(acc_0, sched, sched_record_map, fetch_width, tb_capacity,
+            addr_dim, dim2, is_dual_port, true, true, &still_bad);
+    cout << "TB capacity: refetching per use (vectorization dim " << vectorized_dim << " -> " << dim2 << ")"
+         << (still_bad ? ", still too large for the TB" : "") << endl;
+    vectorized_dim = dim2;
+    return second;
   }
 
   std::set<int> get_decouple_tb_in_dim(isl_map* acc_0, int fetch_width, int addr_dim) {
