@@ -14540,6 +14540,61 @@ UBufferImpl generate_optimized_memory_implementation(
 }
 
 
+// 2026-10-18 (clockwork/static-mem-bandwidth-unchecked): a static compile has no
+// handshake to serialize SRAM accesses. A fetch-width-1 ("lake_dp") bank whose ports
+// access the memory in the same cycle more often than the SRAM has ports gives wrong
+// data: lake's static port mux lets the lowest-index port (a write) through and drops
+// the other access, silently (conv_3_3 on a fw1 single-port spec writes and reads each
+// row bank every cycle). A single-port SRAM does one access per cycle, a dual-port one
+// a write and a read. Wide-fetch banks get their own collision search
+// (search_for_sram2tb_schedule); ponds and ready-valid compiles are not checked.
+// MEM_NO_BANDWIDTH_CHECK=1 skips the check.
+static void check_static_lake_dp_bandwidth(CodegenOptions& options, UBuffer& buf) {
+  const char* off = std::getenv("MEM_NO_BANDWIDTH_CHECK");
+  if (off && off[0] == '1') {
+    return;
+  }
+  bool dual_port = options.mem_hierarchy.at("mem").dual_port_sram;
+  vector<pair<string, bool>> ports;  // (port, writes the SRAM)
+  for (auto& pt : buf.get_in_ports()) {
+    ports.push_back({pt, true});
+  }
+  for (auto& pt : buf.get_out_ports()) {
+    ports.push_back({pt, false});
+  }
+  auto cycles = [&](const string& pt) {
+    return range(its(to_map(buf.schedule.at(pt)), buf.domain.at(pt)));
+  };
+  for (size_t i = 0; i < ports.size(); i++) {
+    for (size_t j = i + 1; j < ports.size(); j++) {
+      if (dual_port && ports.at(i).second != ports.at(j).second) {
+        continue;  // its own write port and read port
+      }
+      isl_set* both = its(cycles(ports.at(i).first), cycles(ports.at(j).first));
+      if (empty(both)) {
+        continue;
+      }
+      const char* coll = std::getenv("LAKE_COLLATERAL_JSON_MEM");
+      std::ostringstream msg;
+      msg << "ERROR: static compile: ports " << ports.at(i).first
+          << (ports.at(i).second ? " (write)" : " (read)") << " and " << ports.at(j).first
+          << (ports.at(j).second ? " (write)" : " (read)") << " of " << buf.name
+          << " access its SRAM in the same cycle (" << str(card(both)) << " cycles, the first at "
+          << to_int(lexminval(both)) << "), but the memory ("
+          << (coll ? coll : "no LAKE_COLLATERAL_JSON_MEM") << ") is fetch-width-1 "
+          << (dual_port ? "dual-port: one write and one read per cycle"
+                        : "single-port: one access per cycle")
+          << ". Without ready-valid the second access is dropped. Use a "
+          << (dual_port ? "" : "dual-port or ") << "wide-fetch memory, or compile ready-valid "
+          << "(DENSE_READY_VALID=1). MEM_NO_BANDWIDTH_CHECK=1 skips this check.";
+      std::cerr << msg.str() << endl;
+      throw std::runtime_error(msg.str());
+    }
+  }
+  cout << "\tSRAM ports of " << buf.name << ": " << ports.size() << " ports, no two in one cycle on a "
+       << (dual_port ? "dual" : "single") << "-port fw1 memory" << endl;
+}
+
 //This function will go through the ubufferimpl data type
 //and create some essenstial information for garnet mapping
 
@@ -14614,6 +14669,10 @@ void lower_to_garnet_implementation(CodegenOptions& options,
     target_buf.simplify_floor_div_expr();
     cout << "AFTER SIMPLIFY FLOOR" << endl;
     cout << target_buf << endl;
+
+    if (CGRAImpl.config_mode == "lake_dp" && !dense_rv_compile()) {
+      check_static_lake_dp_bandwidth(options, target_buf);
+    }
 
     if (CGRAImpl.config_mode == "lake") {
       map<string, UBuffer> vectorized_buf;
