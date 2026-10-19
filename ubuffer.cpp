@@ -2511,6 +2511,133 @@ isl_map* add_config_with_dom_dim_merge(ConfigMap& config_info, isl_map* & opt_sc
 }
 
 //Wide fetch width codegen
+static bool tb_enumerate(isl_map* time, isl_map* word, vector<vector<long long> >& out);
+
+// ---- TB slot allocation check (static MEM tiles) ----
+// The TB addresses of a wide-fetch tile come from the (linearized) address of the data, reduced modulo the
+// capacity in the address generators. Two words that are fetched one after another and share their address
+// modulo the TB capacity land in ONE slot even when the TB has another free slot, so a fetch that becomes visible
+// before the last read of the previous word (the single-port collision search moves one of two identical fetch
+// streams a cycle earlier) overwrites live data. Replay the fetches (visible 2 cycles after issue) and the
+// reads on the physical slots, floor(addr / fetch_width) mod tb_words, and count the reads that do not see the
+// word they address.
+static long long tb_slot_hazards(const vector<vector<long long> >& writes, const vector<vector<long long> >& reads,
+        int fw, int tb_words, std::function<long long(long long)> remap, int vis) {
+  vector<array<long long, 3> > ev;  // time, type (0 write, 1 read), address
+  for (auto& w : writes) ev.push_back({w[0] + vis, 0, w[1]});
+  for (auto& r : reads) ev.push_back({r[0], 1, r[1]});
+  std::sort(ev.begin(), ev.end());
+  map<long long, long long> slots;  // slot -> word held (original address / fw)
+  long long bad = 0;
+  for (auto& e : ev) {
+    long long slot = (remap(e[2]) / fw) % tb_words;
+    if (e[1] == 0) {
+      slots[slot] = e[2] / fw;
+    } else {
+      auto it = slots.find(slot);
+      if (it == slots.end() || it->second != e[2] / fw) bad++;
+    }
+  }
+  return bad;
+}
+
+// Purely affine (no floor/mod terms) single-piece map?
+static bool tb_map_is_affine(isl_map* m) {
+  isl_pw_multi_aff* pma = isl_pw_multi_aff_from_map(cpy(m));
+  if (pma == nullptr) return false;
+  bool ok = isl_pw_multi_aff_n_piece(pma) == 1;
+  if (ok) {
+    struct Piece { static isl_stat f(isl_set* s, isl_multi_aff* ma, void* u) {
+        bool* ok = (bool*) u;
+        for (int i = 0; i < isl_multi_aff_dim(ma, isl_dim_out); i++) {
+          isl_aff* a = isl_multi_aff_get_aff(ma, i);
+          if (isl_aff_dim(a, isl_dim_div) != 0) *ok = false;
+          isl_aff_free(a);
+        }
+        isl_set_free(s); isl_multi_aff_free(ma);
+        return isl_stat_ok; } };
+    isl_pw_multi_aff_foreach_piece(pma, Piece::f, &ok);
+  }
+  isl_pw_multi_aff_free(pma);
+  return ok;
+}
+
+// Try to re-address the TB of one sram2tb op / tb2out op pair so that consecutive fetches alternate between the
+// TB's words. On success returns true and the new linear (affine) write and read maps; false if no change is
+// needed or no hazard-free candidate with purely affine results exists.
+static bool tb_pingpong_remap(const string& tb_name, isl_map* w_acc, isl_map* w_sched, isl_map* r_acc,
+        isl_map* r_sched, int fw, int tb_words, int cap_total, isl_map*& new_w, isl_map*& new_r,
+        isl_map*& new_r_sched) {
+  vector<vector<long long> > writes, reads;
+  if (!tb_enumerate(w_sched, w_acc, writes) || !tb_enumerate(r_sched, r_acc, reads)) return false;
+  if (writes.empty() || reads.empty() || writes.size() + reads.size() > 400000) return false;
+  if (writes[0].size() != 2 || reads[0].size() != 2) return false;
+  if (tb_words < 2 || cap_total % (fw * tb_words) != 0) return false;
+  const int vis = 2;
+  long long bad0 = tb_slot_hazards(writes, reads, fw, tb_words, [](long long a) { return a; }, vis);
+  if (bad0 == 0) return false;
+  cout << "TBSLOT " << tb_name << ": " << bad0 << " of " << reads.size() << " reads see an overwritten word ("
+       << tb_words << " TB words, address mod " << cap_total << ")" << endl;
+  struct Cand { bool keep_low; long long K; };
+  vector<Cand> cands = {{true, fw}, {false, fw}};
+  for (auto& c : cands) {
+    long long P = cap_total;
+    auto f = [&](long long a) { return c.keep_low ? (a % P) + c.K * (a / P) : (a % fw) + c.K * (a / P); };
+    long long bad = tb_slot_hazards(writes, reads, fw, tb_words, f, vis);
+    cout << "TBSLOT " << tb_name << ": candidate " << (c.keep_low ? "keep" : "drop") << "-low K=" << c.K
+         << " P=" << P << " -> " << bad << " bad reads" << endl;
+    if (bad != 0) continue;
+    string nm = range_name(w_acc);
+    string txt = c.keep_low ? "{ " + nm + "[a] -> " + nm + "[a mod " + str(P) + " + " + str(c.K) + "*floor(a/" + str(P) + ")] }"
+                            : "{ " + nm + "[a] -> " + nm + "[a mod " + str(fw) + " + " + str(c.K) + "*floor(a/" + str(P) + ")] }";
+    isl_map* rm = isl_map_read_from_str(ctx(w_acc), txt.c_str());
+    auto nw = its(simplify(dot(cpy(w_acc), cpy(rm))), ::domain(w_acc));
+    auto nr = its(simplify(dot(cpy(r_acc), cpy(rm))), ::domain(r_acc));
+    if (tb_map_is_affine(nw) && tb_map_is_affine(nr)) {
+      new_w = nw;
+      new_r = nr;
+      new_r_sched = cpy(r_sched);
+      return true;
+    }
+    cout << "TBSLOT " << tb_name << ": candidate not affine (write " << str(nw) << " read " << str(nr) << ")" << endl;
+    // "a mod fw" (the lane) is not affine in a loop that steps through more than fw elements: split that read
+    // loop into (element group, lane) and compose again.
+    if (!c.keep_low && tb_map_is_affine(nw)) {
+      auto raff = get_aff(r_acc);
+      int nd = num_in_dims(r_acc);
+      for (int k = 1; k < nd; k++) {
+        if (to_int(get_coeff(raff, k)) != 1) continue;
+        int ext = get_dim_extent(::domain(r_acc), k);
+        if (ext <= fw || ext % fw != 0) continue;
+        string op = domain_name(r_acc);
+        vector<string> in_v, out_v;
+        for (int d = 0; d < nd; d++) {
+          in_v.push_back("d" + std::to_string(d));
+          if (d == k) { out_v.push_back("u"); out_v.push_back("v"); }
+          else out_v.push_back("d" + std::to_string(d));
+        }
+        string split = "{ " + op + sep_list(in_v, "[", "]", ",") + " -> " + op + sep_list(out_v, "[", "]", ",") +
+            " : d" + std::to_string(k) + " = " + str(fw) + "u + v and 0 <= v < " + str(fw) + " }";
+        isl_map* T = isl_map_read_from_str(ctx(r_acc), split.c_str());
+        isl_map* Tinv = isl_map_reverse(T);
+        auto racc2 = dot(Tinv, cpy(r_acc));
+        auto rsch2 = dot(cpy(Tinv), cpy(r_sched));
+        auto nr2 = simplify(dot(cpy(racc2), cpy(rm)));
+        nr2 = its(nr2, ::domain(racc2));
+        if (tb_map_is_affine(nr2)) {
+          cout << "TBSLOT " << tb_name << ": split read loop " << k << " (extent " << ext << ") into groups of " << fw << endl;
+          new_w = nw;
+          new_r = nr2;
+          new_r_sched = its(simplify(rsch2), ::domain(racc2));
+          return true;
+        }
+      }
+    }
+  }
+  cout << "TBSLOT " << tb_name << ": no hazard-free affine re-addressing found" << endl;
+  return false;
+}
+
 Json UBuffer::generate_ubuf_args(CodegenOptions& options, map<string, UBuffer> & rewrite_buffer) {
     cout << "THIS UBUF ARGS (1)" << endl;
     Json ret;
@@ -2610,6 +2737,8 @@ Json UBuffer::generate_ubuf_args(CodegenOptions& options, map<string, UBuffer> &
               cout << "op_name: " << op_name_agg2sram << ", extent_0: " << extent_0 << ", stride_0: " << stride_0 << endl;
             }
         }
+        vector<string> tb_w_ops, tb_r_ops;
+        vector<isl_map*> tb_w_maps, tb_r_maps;
         auto out_acc_umap = ubuf.producer_map();
         for (auto out_acc_map: get_maps(out_acc_umap)) {
             out_acc_map = pick_left_most_access(out_acc_map);
@@ -2621,6 +2750,8 @@ Json UBuffer::generate_ubuf_args(CodegenOptions& options, map<string, UBuffer> &
             auto reduce_map = linear_address_map_lake(to_set(ubuf.input_range()), mem.fetch_width);
             auto linear_acc_map = dot(out_acc_map, reduce_map);
             map_insert(op2write_map, domain_name(out_acc_map), to_umap(linear_acc_map));
+            tb_w_ops.push_back(domain_name(out_acc_map));
+            tb_w_maps.push_back(cpy(linear_acc_map));
         }
         auto in_acc_umap = ubuf.consumer_map();
         for (auto in_acc_map: get_maps(in_acc_umap)) {
@@ -2632,6 +2763,8 @@ Json UBuffer::generate_ubuf_args(CodegenOptions& options, map<string, UBuffer> &
             auto reduce_map = linear_address_map_lake(to_set(ubuf.input_range()), mem.fetch_width);
             auto linear_acc_map = dot(in_acc_map, reduce_map);
             map_insert(op2read_map, domain_name(in_acc_map), to_umap(linear_acc_map));
+            tb_r_ops.push_back(domain_name(in_acc_map));
+            tb_r_maps.push_back(cpy(linear_acc_map));
 
             //TODO: move this hack into vectorization
             auto dom = ::domain(linear_acc_map);
@@ -2644,6 +2777,24 @@ Json UBuffer::generate_ubuf_args(CodegenOptions& options, map<string, UBuffer> &
                 cout << "acc_map: " << str(linear_acc_map) << endl;
               op2sched[op_name] = its(sched_remove_dom, dom);
             }
+        }
+
+        // static TB: make sure consecutive fetches do not overwrite a word that is still being read
+        if (contains(ubuf.name, "tb") && !dense_rv_compile() && getenv("TB_NO_PINGPONG") == nullptr &&
+            tb_w_ops.size() == 1 && tb_r_ops.size() == 1 && mem.get_capacity("tb") / mem.fetch_width >= 2) {
+          int cap_total = mem.get_capacity("tb") * mem.bank_num.at("tb");
+          isl_map* nw = nullptr;
+          isl_map* nr = nullptr;
+          isl_map* nr_sched = nullptr;
+          if (tb_pingpong_remap(ubuf.name, tb_w_maps[0], op2sched.at(tb_w_ops[0]), tb_r_maps[0],
+                  op2sched.at(tb_r_ops[0]), mem.fetch_width, mem.get_capacity("tb") / mem.fetch_width, cap_total, nw, nr, nr_sched)) {
+            op2sched[tb_r_ops[0]] = nr_sched;
+            cout << "TBSLOT " << ubuf.name << ": re-addressed write " << str(nw) << " read " << str(nr) << endl;
+            op2write_map[tb_w_ops[0]].clear();
+            op2write_map[tb_w_ops[0]].push_back(to_umap(nw));
+            op2read_map[tb_r_ops[0]].clear();
+            op2read_map[tb_r_ops[0]].push_back(to_umap(nr));
+          }
         }
     }
 
