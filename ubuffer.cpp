@@ -12148,10 +12148,20 @@ bool pad_range_one_vec_dim(map<int, int> & dim2denom,
     cout << "Preliminary vectorization dim: " << pvec_dim << endl;
     vector<bool> rel_map = relation_map(acc_vec_new);
 
+    // The padding below adds an iteration to the dimension in front of the vectorized one and relates it to the
+    // schedule's time (add_relation_ubuf_map), which only works for a dimension the schedule does not use yet.
+    // A tile that fits one fetch word (matmul_tile tx=4 with ux=2: word = floor((2 xio + lane) / 4) = 0) gets two
+    // denominators and ends up here with a real outer loop (yio) the access does not use but the schedule does:
+    // that was an assert. Such a loop is just a re-access of the same words, so skip the padding.
+    bool sched_uses_pad_dim = (pvec_dim >= 1) && relation_map(sched_vec_new).at(pvec_dim-1);
+    if (sched_uses_pad_dim && !rel_map.at(pvec_dim-1) && dim2denom.size() > 1 && !back_to_back_access) {
+      cout << "\tNo padding of dimension " << pvec_dim - 1 << ": the schedule already iterates it" << endl;
+    }
+
     bool pad_zero_iteration =false;
     //TODO male this more formal
     if ((!(rel_map.at(pvec_dim-1))) && (dim2denom.size() > 1)
-            && (!back_to_back_access) && (pvec_dim-1)) {
+            && (!back_to_back_access) && (pvec_dim-1) && !sched_uses_pad_dim) {
       //Find the iteration dimension and pad 0 to 1
       cout << str(acc_vec_new) << endl;
       int in_dim = num_in_dims(acc_vec_new);
@@ -12436,6 +12446,17 @@ bool pad_range_one_vec_dim(map<int, int> & dim2denom,
             addr_dim, dim2, is_dual_port, true, true, &still_bad);
     cout << "TB capacity: refetching per use (vectorization dim " << vectorized_dim << " -> " << dim2 << ")"
          << (still_bad ? ", still too large for the TB" : "") << endl;
+    if (still_bad && getenv("TB_ALLOW_OVERFLOW") == nullptr) {
+      // Even one fetch per use leaves more words live than the TB holds (a reader that revisits many words
+      // between two uses of one word, e.g. a reduction-outer matmul accumulating in a MEM tile). The hardware
+      // would overwrite live data and the app would compute wrong values without any message.
+      cout << "ERROR: static compile: the TB of a memory cannot hold the words one of its readers revisits ("
+           << "tb_capacity " << tb_capacity << " elements, fetch_width " << fetch_width
+           << "); change the Halide schedule or use a memory with a larger vec_capacity. "
+           << "TB_ALLOW_OVERFLOW=1 compiles it anyway (the result is wrong)." << endl;
+      cerr << "ERROR: static compile: TB too small for the access pattern (see mem_cout); TB_ALLOW_OVERFLOW=1 to ignore" << endl;
+      assert(false);
+    }
     vectorized_dim = dim2;
     return second;
   }
@@ -13062,6 +13083,12 @@ bool pad_range_one_vec_dim(map<int, int> & dim2denom,
               } else {
                   auto out_dom = domain.at(pick(get_out_ports()));
                   auto in_dom = domain.at(pick(get_in_ports()));
+                  // a fetch domain with more loops than the read domain (e.g. one loop per use after a
+                  // refetch vectorization) has nothing to pad against in the read domain
+                  if (pad_dim >= ::num_dims(out_dom) || pad_dim >= ::num_dims(in_dom)) {
+                    cout << "No padding of dimension " << pad_dim << ": not in both domains" << endl;
+                    continue;
+                  }
                   int out_ext = get_domain_range(out_dom, pad_dim);
                   int in_ext = get_domain_range(in_dom, pad_dim);
                   if (out_ext == in_ext) {
