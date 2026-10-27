@@ -6120,6 +6120,15 @@ void host2glb_optimization(CodegenOptions& options,
         CoreIR::ModuleDef* def, CoreIR::Instance*buf, bool substract_glb_latency) {
   if (substract_glb_latency) {
     buf->getMetaData()["drive_by_cgpl_ctrl"] = true;
+    if (options.host2glb_latency == 0) {
+      // The static schedule starts a controller past the MEM tile's cycle counter (lake collateral counter_ub)
+      // and there is no GLB-staged input whose load time could be subtracted from every start.
+      cout << "ERROR: static compile: a controller of " << buf->getInstname() << " starts after the MEM cycle"
+           << " counter limit and there is no GLB input to subtract (host2glb_latency 0). The schedule is"
+           << " probably sequential (\"is not a stencil\" in mem_cout): make the pipeline rate-matchable (unroll"
+           << " reduction loops, as tests/down_sample does) or stage the input in the GLB." << endl;
+      cerr << "ERROR: static compile: schedule exceeds the MEM cycle counter with no GLB input (see mem_cout)" << endl;
+    }
     assert(options.host2glb_latency != 0);
     int glb_load_latency= options.host2glb_latency;
     //Substract all the cycle starting address in configuration
@@ -6153,6 +6162,15 @@ void host2glb_optimization(CodegenOptions& options,
         CoreIR::ModuleDef* def, CoreIR::Instance*buf, GarnetImpl& hw_impl) {
   if (hw_impl.substract_glb_latency) {
     buf->getMetaData()["drive_by_cgpl_ctrl"] = true;
+    if (options.host2glb_latency == 0) {
+      // The static schedule starts a controller past the MEM tile's cycle counter (lake collateral counter_ub)
+      // and there is no GLB-staged input whose load time could be subtracted from every start.
+      cout << "ERROR: static compile: a controller of " << buf->getInstname() << " starts after the MEM cycle"
+           << " counter limit and there is no GLB input to subtract (host2glb_latency 0). The schedule is"
+           << " probably sequential (\"is not a stencil\" in mem_cout): make the pipeline rate-matchable (unroll"
+           << " reduction loops, as tests/down_sample does) or stage the input in the GLB." << endl;
+      cerr << "ERROR: static compile: schedule exceeds the MEM cycle counter with no GLB input (see mem_cout)" << endl;
+    }
     assert(options.host2glb_latency != 0);
     int glb_load_latency= options.host2glb_latency;
     //Substract all the cycle starting address in configuration
@@ -12881,6 +12899,7 @@ bool pad_range_one_vec_dim(map<int, int> & dim2denom,
               int pt_cnt = 0;
              std::set<int> proj_dim =
                  get_decouple_tb_in_dim(to_map(access_map.at(out_pt_name)), fetch_width, dim_id);
+             int tb_in_range_dims = -1;
               for (auto interpolation: range_interpolation_maps) {
                 string tb_pt_name = out_pt_name + "_out_" + std::to_string(pt_cnt);
                 tb.port_bundles[bd_name + "_tb_in"].push_back(tb_pt_name);
@@ -12916,6 +12935,7 @@ bool pad_range_one_vec_dim(map<int, int> & dim2denom,
                 //auto final_sched = dot(domain_trans, its(sched, dom));
                 //sram_out_access_map = dot(domain_trans, sram_out_access_map);
                 //tb_in_access_map = dot(domain_trans, decouple_acc_map);
+                tb_in_range_dims = num_out_dims(tb_in_access_map);
                 tb.add_in_pt(tb_pt_name, ::domain(tb_in_access_map), tb_in_access_map, simplify_expr(final_sched));
                 sram.add_out_pt(sram_pt_name, ::domain(sram_out_access_map), sram_out_access_map, simplify_expr(final_sched));
               }
@@ -12931,6 +12951,18 @@ bool pad_range_one_vec_dim(map<int, int> & dim2denom,
                       to_map(access_map.at(out_pt_name)),
                       to_map(schedule.at(out_pt_name)),
                       fetch_width, dim_id, vectorized_dim);
+              if (tb_in_range_dims >= 0 && num_out_dims(tb_ir.first) != tb_in_range_dims) {
+                // The stripmined read decouples the projected strip loops into their own TB coordinates, the
+                // write side only the loops outside its fetch loop; with a different number of coordinates the
+                // address linearization composes maps of different arity (this used to abort in to_map).
+                cout << "ERROR: static compile: TB " << name << " port " << out_pt_name << " is read with "
+                     << num_out_dims(tb_ir.first) << " address coordinates but written with " << tb_in_range_dims
+                     << " (read " << str(tb_ir.first) << "). A wide-fetch read whose stride-2 / non-unrolled"
+                     << " reduction loops are split across the fetch word is not supported; unroll the reduction"
+                     << " in the Halide schedule (e.g. tests/down_sample: max_pool.update().unroll(r.x).unroll(r.y))." << endl;
+                cerr << "ERROR: static compile: TB read/write address coordinates disagree for " << name << " (see mem_cout)" << endl;
+                assert(false);
+              }
 
               auto outpt_acc_map = add_range_suffix(tb_ir.first, "_" + to_string(tb_cnt) + "_tb");
               isl_set* sm_domain = ::domain(outpt_acc_map);
