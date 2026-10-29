@@ -3916,6 +3916,59 @@ CoreIR::Wireable* findChainDataIn(CoreIR::Wireable* mem_data_out, int port_id) {
 
 }
 
+// 2026-10-28: a MEM bank must not use more data ports than the memory has. The
+// wiring below numbers a bank's writers data_in_0.. and readers data_out_0..
+// without a limit, and garnet's lake-spec pin remap then fails with a KeyError
+// at PnR (resnet's conv accumulator on a 1-input spec: an init writer and an
+// update writer). The limit is the MEM collateral's interconnect_in/out_num,
+// read from LAKE_COLLATERAL_JSON_MEM itself: the static fetch2 path replaces
+// the in-memory collateral with a 2-port preset. No collateral: not checked.
+static void check_mem_bank_ports(const string& buf_name, const string& config_mode,
+        const UBufferImpl& impl, int bank_id) {
+  if (config_mode != "lake" && config_mode != "lake_dp") {
+    return;
+  }
+  static bool loaded = false;
+  static int max_in = -1, max_out = -1;
+  const char* coll = std::getenv("LAKE_COLLATERAL_JSON_MEM");
+  if (!loaded) {
+    loaded = true;
+    if (coll && coll[0] != '\0') {
+      try {
+        LakeCollateral lc = load_lake_collateral_from_json(coll);
+        max_in = lc.interconnect_in_num;
+        max_out = lc.interconnect_out_num;
+      } catch (...) {
+        cout << "MEM port check: cannot read " << coll << "; not checked" << endl;
+      }
+    }
+  }
+  if (max_in < 0) {
+    return;
+  }
+  int n_in = impl.bank_inpt2writers.at(bank_id).size();
+  int n_out = impl.bank_outpt2readers.at(bank_id).size();
+  if (n_in <= max_in && n_out <= max_out) {
+    return;
+  }
+  std::ostringstream msg;
+  msg << "ERROR: compile: memory bank " << bank_id << " of " << buf_name << " needs " << n_in
+      << " write port(s) and " << n_out << " read port(s), but the MEM (" << coll
+      << ") has " << max_in << " input and " << max_out << " output port(s). Writers:";
+  for (auto& s : impl.bank_inpt2writers.at(bank_id)) {
+    msg << " " << sep_list(vector<string>(s.begin(), s.end()), "{", "}", ",");
+  }
+  msg << "; readers:";
+  for (auto& s : impl.bank_outpt2readers.at(bank_id)) {
+    msg << " " << sep_list(vector<string>(s.begin(), s.end()), "{", "}", ",");
+  }
+  msg << ". An accumulation buffer has two writers (its initialization and its update);"
+      << " on a memory with one input port keep the accumulator in a pond instead"
+      << " (e.g. apps/resnet_pond with -enable_ponds), or use a memory with more ports.";
+  std::cerr << msg.str() << endl;
+  throw std::runtime_error(msg.str());
+}
+
 void UBuffer::wire_ubuf_IO(CodegenOptions& options,CoreIR::ModuleDef* def, map<string, CoreIR::Wireable*> & pt2wire,
         CoreIR::Instance* buf, UBufferImpl & impl, schedule_info & info, int bank_id, bool with_ctrl) {
   auto context = def->getContext();
@@ -3923,6 +3976,7 @@ void UBuffer::wire_ubuf_IO(CodegenOptions& options,CoreIR::ModuleDef* def, map<s
   int inpt_cnt = 0, outpt_cnt = 0;
   string config_mode = buf->getMetaData()["mode"];
   cout << "Config mode: " << config_mode << endl;
+  check_mem_bank_ports(name, config_mode, impl, bank_id);
   //TODO: remove this
   for (auto inpt_broadcast_set: impl.bank_inpt2writers.at(bank_id)) {
     //Cannot wire multiple wire into one memory port
@@ -12243,9 +12297,10 @@ bool pad_range_one_vec_dim(map<int, int> & dim2denom,
   // vector that becomes visible overwrites a slot, so at most tb_words vectors may be live at any time
   // (any slot allocation needs that much). Returns false and sets max_live / why if not.
   bool tb_fetch_feasible(isl_map* sched, isl_map* rd_word, isl_map* fetch_sched, isl_map* fetch_word,
-          int tb_words, int tb_vis, long long max_points, int& max_live, string& why) {
+          int tb_words, int tb_vis, long long max_points, int& max_live, string& why, int* missing_out = nullptr) {
     vector<vector<long long> > reads, fetches;
     max_live = 0;
+    if (missing_out != nullptr) *missing_out = 0;
     if (!tb_enumerate(sched, rd_word, reads) || !tb_enumerate(fetch_sched, fetch_word, fetches)) {
       why = "domain arity mismatch";
       return true;
@@ -12281,6 +12336,7 @@ bool pad_range_one_vec_dim(map<int, int> & dim2denom,
     }
     if (missing) {
       why = "reads with no visible fetch: " + str(missing);
+      if (missing_out != nullptr) *missing_out = missing;
       return true;
     }
     // sweep: +1 at visible time, -1 just after the last use
@@ -12306,7 +12362,7 @@ bool pad_range_one_vec_dim(map<int, int> & dim2denom,
 
   static pair<isl_map*, isl_map*> get_vectorized_read_simplified_impl(isl_map* acc_0, isl_map* sched, map<string, isl_map*> sched_record_map,
           int fetch_width, int tb_capacity, int addr_dim, int& vectorized_dim, bool is_dual_port,
-          bool force_refetch, bool check_tb, bool* tb_infeasible) {
+          bool force_refetch, bool check_tb, bool* tb_infeasible, bool force_pad = false, int* tb_missing = nullptr) {
 
     isl_ctx* ctx = ::ctx(acc_0);
 
@@ -12416,7 +12472,13 @@ bool pad_range_one_vec_dim(map<int, int> & dim2denom,
     int origin_max = get_dim_max(range(acc_slice), addr_dim);
     //cout << "new max: " << new_max << ", acc map: " << str(acc_vec_rem) << endl;
     //cout << "origin max: " << origin_max << ", acc map: " << str(acc_slice) << endl;
-    if (new_max < origin_max) {
+    // force_pad: the max over the whole domain can hide a pass of the fetch loop that stops
+    // short (resnet on fw2: the r.x = 1 pass needs word 14, which only the r.x = 2 pass
+    // fetches), so a retry pads whenever a fetch is ahead of the floor-free word.
+    if (new_max < origin_max || (force_pad && ahead_step > 0)) {
+      if (!(new_max < origin_max)) {
+        cout << "TB fetch: padding the fetch loop by " << ahead_step << " (forced)" << endl;
+      }
       acc_vec_rem = pad_to_domain_ubuf_map(acc_vec_rem, vectorized_dim, ahead_step);
       sched_vec_new = pad_to_domain_ubuf_map(sched_vec_new, vectorized_dim, ahead_step);
     }
@@ -12441,7 +12503,7 @@ bool pad_range_one_vec_dim(map<int, int> & dim2denom,
       int max_live = 0;
       string why;
       int tb_words = std::max(1, tb_capacity / fetch_width);
-      bool ok = tb_fetch_feasible(sched, acc_slice, final_sched, acc_vec_rem, tb_words, 2, 400000, max_live, why);
+      bool ok = tb_fetch_feasible(sched, acc_slice, final_sched, acc_vec_rem, tb_words, 2, 400000, max_live, why, tb_missing);
       cout << "TBCHK vectorized_dim=" << vectorized_dim << (force_refetch ? " (refetch)" : "") << " max live words=" << max_live
            << " TB words=" << tb_words << " (" << why << ")" << (ok ? "" : "  -> TB too small") << endl;
       *tb_infeasible = !ok;
@@ -12452,8 +12514,27 @@ bool pad_range_one_vec_dim(map<int, int> & dim2denom,
   pair<isl_map*, isl_map*> get_vectorized_read_simplified(isl_map* acc_0, isl_map* sched, map<string, isl_map*> sched_record_map,
           int fetch_width, int tb_capacity, int addr_dim, int& vectorized_dim, bool is_dual_port) {
     bool infeasible = false;
+    int missing = 0;
     auto first = get_vectorized_read_simplified_impl(acc_0, sched, sched_record_map, fetch_width, tb_capacity,
-            addr_dim, vectorized_dim, is_dual_port, false, !dense_rv_compile(), &infeasible);
+            addr_dim, vectorized_dim, is_dual_port, false, !dense_rv_compile(), &infeasible, false, &missing);
+    // 2026-10-28: some reads have no fetch of their word before them (the fetch loop
+    // stops short in one pass): pad the fetch loop and keep that if it covers every read.
+    // Static only (the check does not run for ready-valid); TB_NO_FETCH_PAD=1 turns it off.
+    bool pad = false;
+    if (missing > 0 && getenv("TB_NO_FETCH_PAD") == nullptr) {
+      bool infeasible_pad = false;
+      int missing_pad = 0, dim_pad = 0;
+      auto padded = get_vectorized_read_simplified_impl(acc_0, sched, sched_record_map, fetch_width, tb_capacity,
+              addr_dim, dim_pad, is_dual_port, false, true, &infeasible_pad, true, &missing_pad);
+      cout << "TB fetch: " << missing << " reads had no fetch of their word; padded fetch loop leaves "
+           << missing_pad << (missing_pad == 0 ? " (using it)" : " (not used)") << endl;
+      if (missing_pad == 0) {
+        first = padded;
+        infeasible = infeasible_pad;
+        vectorized_dim = dim_pad;
+        pad = true;
+      }
+    }
     if (!infeasible || getenv("TB_NO_REFETCH") != nullptr) {
       return first;
     }
@@ -12461,7 +12542,7 @@ bool pad_range_one_vec_dim(map<int, int> & dim2denom,
     int dim2 = 0;
     bool still_bad = false;
     auto second = get_vectorized_read_simplified_impl(acc_0, sched, sched_record_map, fetch_width, tb_capacity,
-            addr_dim, dim2, is_dual_port, true, true, &still_bad);
+            addr_dim, dim2, is_dual_port, true, true, &still_bad, pad);
     cout << "TB capacity: refetching per use (vectorization dim " << vectorized_dim << " -> " << dim2 << ")"
          << (still_bad ? ", still too large for the TB" : "") << endl;
     if (still_bad && getenv("TB_ALLOW_OVERFLOW") == nullptr) {

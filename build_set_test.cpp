@@ -21164,7 +21164,12 @@ void compile_for_garnet_dual_port_mem(prog& prg,
   auto hw_sched = its(sched_map,
           prg.whole_iteration_domain());
   cout << "result schedule: " << str(hw_sched) << endl;
-  auto buffers_opt = build_buffers(prg, hw_sched);
+  // 2026-10-28: pass the schedule info like the single-port and fetch2 paths do,
+  // so each compute input port gets its mapped PE pipeline slack (port_latencies).
+  // Without it the static fw=1 dual-port line buffers read every stencil tap at the
+  // op's cycle, so the taps of a pipelined PE tree arrive misaligned (gaussian:
+  // 8398 of 12152 outputs off by 1-3).
+  auto buffers_opt = build_buffers(prg, hw_sched, sched);
   auto sched_max = lexmaxpt(range(hw_sched));
   cout << "Latency of application is: " << str((sched_max)) << endl;
 
