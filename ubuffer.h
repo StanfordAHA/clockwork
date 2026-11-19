@@ -3855,6 +3855,9 @@ lakeStream emit_top_address_stream(string fname, vector<int> read_cycle, vector<
 
 void lower_to_garnet_implementation(CodegenOptions& options,
         UBuffer& buf, UBufferImpl& impl, schedule_info& info);
+// ops that read no buffer (lower_to_garnet_implementation: a static pond may
+// delay a constant init write)
+void record_constant_ops(prog& prg);
 
 int compute_max_dd(UBuffer& buf, const string& inpt);
 

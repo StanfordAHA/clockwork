@@ -2805,6 +2805,7 @@ CoreIR::Module*  generate_coreir_without_ctrl(CodegenOptions& options,
   }
 
   int buf_cnt = 0;
+  record_constant_ops(prg);
 
   for (auto& buf : buffers) {
     //Help for DEBUG

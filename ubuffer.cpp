@@ -2925,9 +2925,31 @@ Json UBuffer::generate_ubuf_args(CodegenOptions& options, map<string, UBuffer> &
 }
 
 
-//Helper function to optimize the pond dimension
-pair<isl_map*, isl_map*> pad_domain( isl_map* sched, isl_map* acc) {
+// 2026-10-29: padding a pond WRITE port adds writes. On a loop whose address
+// stride is 0 (an accumulator: get_all_domain_pad_dims' address test always
+// passes there) the padded slot re-writes the live address with whatever the
+// port carries (static resnet_pond on fw2: r.x stride 6 x 3 under r.y 24 was
+// padded to 4 writes per row), so a write port leaves those loops unpadded.
+// A pad on a moving address lands in the layout's gap, and an extra read only
+// outputs a word nobody consumes.
+map<int, int> pond_pad_dims(isl_map* sched, isl_map* acc, bool is_write) {
     map<int, int> dim2pad = get_all_domain_pad_dims(sched, acc);
+    if (is_write) {
+        for (auto it = dim2pad.begin(); it != dim2pad.end();) {
+            if (it->second != 0 && stride_in_dim(acc, it->first) == 0) {
+                cout << "\tpond write port: dim " << it->first << " not padded (address stride 0)" << endl;
+                it = dim2pad.erase(it);
+            } else {
+                ++it;
+            }
+        }
+    }
+    return dim2pad;
+}
+
+//Helper function to optimize the pond dimension
+pair<isl_map*, isl_map*> pad_domain( isl_map* sched, isl_map* acc, bool is_write = false) {
+    map<int, int> dim2pad = pond_pad_dims(sched, acc, is_write);
     for (auto it: dim2pad) {
         int dim = it.first;
         int pad_depth = it.second;
@@ -2993,7 +3015,7 @@ Json UBuffer::generate_ubuf_args(CodegenOptions& options,
    auto m_pair = make_pair(sched, linear_acc_map);
    string ctrl_cfg_name = "in2"+ctrl_name+"_" + str(in_cnt);
    if (num_in_dims(sched) > mem.get_ctrl_iter_level(ctrl_cfg_name) + 1) {
-     auto pad_pair = pad_domain(sched, (linear_acc_map));
+     auto pad_pair = pad_domain(sched, (linear_acc_map), mem_name == "regfile" && !dense_rv_compile());
      m_pair = merge_dom_dim(pad_pair.first, pad_pair.second, mem.counter_ub);
    } else {
      m_pair = merge_dom_dim(sched, linear_acc_map, mem.counter_ub);
@@ -4915,6 +4937,44 @@ int rv_pond_dims() {
 // final read <= that address's re-init and last update write + L <= final read
 // (RVPondAccum slack_*), and the next tile's inits start after this tile's last
 // update write (the static spec pond's two writers share one memory write port).
+// 2026-10-28: the loops are counted as generate_ubuf_args emits them
+// (static_pond_port_levels), not one level per loop.
+//
+// Lake levels of port p's static pond config, as generate_ubuf_args computes
+// them: pad_domain when the port has more loops than levels (a write port
+// leaves its zero-stride loops unpadded, pond_pad_dims), then merge_dom_dim
+// joins adjacent loops whose schedule and address are both linear across them
+// (static resnet_pond fw1 dp: the 3 pixel loops (cycle strides 12936 / 924 /
+// 66) and the outer reduction loop (22 x 3) are one level, 5 loops -> 2).
+// The address is linearized over the union of the access-map ranges
+// (rv_pond_linear_addr; global_range() needs the isl ctx a bank copy lacks).
+static std::set<string> g_constant_ops;
+
+void record_constant_ops(prog& prg) {
+  g_constant_ops.clear();
+  for (auto op : prg.all_ops()) {
+    if (op->buffers_read().empty()) {
+      g_constant_ops.insert(op->name);
+    }
+  }
+}
+
+static int static_pond_port_levels(UBuffer& buf, const string& p, const LakeCollateral& mem, int iter_level) {
+  uset* granges = nullptr;
+  for (auto am : buf.access_map) {
+    granges = granges == nullptr ? range(am.second) : unn(granges, range(am.second));
+  }
+  auto acc_map = remove_irrelevant_in_dim(to_map(buf.access_map.at(p)));
+  auto sched = remove_irrelevant_in_dim(to_map(buf.schedule.at(p)));
+  auto linear_acc_map = dot(acc_map, linear_address_map_lake(to_set(granges), mem.fetch_width));
+  auto m_pair = make_pair(sched, linear_acc_map);
+  if (num_in_dims(sched) > iter_level + 1) {
+    m_pair = pad_domain(sched, linear_acc_map, !buf.is_out_pt(p));
+  }
+  m_pair = merge_dom_dim(m_pair.first, m_pair.second, mem.counter_ub);
+  return num_in_dims(m_pair.first) - 1;
+}
+
 static bool static_pond_keeps_pixel_loops(UBuffer& buf) {
   auto pc = loaded_regfile_collateral();
   if (!pc) {
@@ -4929,19 +4989,45 @@ static bool static_pond_keeps_pixel_loops(UBuffer& buf) {
     cout << "Static pond " << buf.name << ": restarted per pixel (" << why << ")" << endl;
     return false;
   };
-  if (pa.n_pix + pa.n_red + pa.n_tpix > pc->iteration_level) {
-    return fail(str(pa.n_pix + pa.n_red + pa.n_tpix) + " loops > pond iteration_level " + str(pc->iteration_level));
+  int iter_level = pc->iteration_level;
+  for (auto& it : pc->iter_level_map) {
+    if (it.first.rfind("in2regfile_", 0) == 0 || it.first.rfind("regfile2out_", 0) == 0) {
+      iter_level = min(iter_level, it.second);
+    }
   }
-  if (pa.n_tpix != 0 && !(pa.t_upd_last < pa.t_init + pa.step)) {
-    return fail("the next tile's init (" + str(pa.t_init + pa.step) + ") overlaps this tile's update writes (last " +
+  for (auto p : buf.get_all_ports()) {
+    int levels = static_pond_port_levels(buf, p, *pc, iter_level);
+    if (levels > iter_level) {
+      return fail("port " + p + ": " + str(levels) + " levels after merging its " +
+                  str(pa.n_pix + pa.n_red + pa.n_tpix) + " loops > pond iteration_level " + str(iter_level));
+    }
+  }
+  // 2026-10-29: the next pixel's init may be scheduled before this pixel's
+  // final read (static resnet_pond on fw2 sp: init 1322 + 72p, final 1395 + 72p).
+  // A constant init (its op reads no buffer, so the PE output it writes never
+  // changes) is delayed by that overlap when it still lands L cycles before the
+  // first update read; it then stays clear of the update writes, which lie
+  // between the first update read and the final read.
+  int k = 0;
+  if (pa.slack_final_init < 0 && g_constant_ops.count(::name(buf.domain.at(pa.w_init)))) {
+    k = -pa.slack_final_init;
+  }
+  if (pa.n_tpix != 0 && !(pa.t_upd_last < pa.t_init + k + pa.step)) {
+    return fail("the next tile's init (" + str(pa.t_init + k + pa.step) + ") overlaps this tile's update writes (last " +
                 str(pa.t_upd_last) + ") on the shared write port");
   }
-  if (!(pa.t_init_last + L <= pa.t_upd_first && pa.slack_upd_final >= L && pa.slack_final_init >= 0)) {
+  if (!(pa.t_init_last + k + L <= pa.t_upd_first && pa.slack_upd_final >= L && pa.slack_final_init + k >= 0)) {
     return fail("schedule init " + str(pa.t_init) + ".." + str(pa.t_init_last) + ", updates " +
                 str(pa.t_upd_first) + ".." + str(pa.t_upd_last) + ", final " + str(pa.t_final) + ".." +
                 str(pa.t_final_last) + ", pixel step " + str(pa.step) +
                 " (per address: final - last update " + str(pa.slack_upd_final) + ", next init - final " +
-                str(pa.slack_final_init) + ") does not order init -> updates -> final read -> next init with store latency " + str(L));
+                str(pa.slack_final_init) + ") does not order init -> updates -> final read -> next init with store latency " + str(L) +
+                (k ? " (constant init delayed " + str(k) + ")" : ""));
+  }
+  if (k) {
+    buf.schedule[pa.w_init] = to_umap(linear_schedule(to_map(buf.schedule.at(pa.w_init)), {1}, k, false));
+    cout << "Static pond " << buf.name << ": constant init " << pa.w_init << " delayed " << k
+         << " cycle(s), after the previous pixel's final read" << endl;
   }
   cout << "Static pond " << buf.name << ": " << (pa.n_tpix ? "tiled " : "") << "accumulation pond keeps its " << pa.n_pix
        << (pa.n_tpix ? " tile" : " pixel") << " loop(s) (no per-pixel flush controller)" << endl;
@@ -14889,6 +14975,50 @@ static void check_static_lake_dp_bandwidth(CodegenOptions& options, UBuffer& buf
 //This function will go through the ubufferimpl data type
 //and create some essenstial information for garnet mapping
 
+// 2026-10-29: the scheduler gives a buffer its level's latencies by the
+// buffer's logical capacity (garnet_schedule_info, apply_regfile_latencies),
+// but determine_config_mode maps each BANK by the bank's capacity. A buffer
+// over the pond capacity whose banks fit (static resnet_pond's kernel: 108
+// words in 4 banks of 27) is scheduled with the MEM's load latency (fw1
+// lake_dp: 1, data the cycle after the read) and mapped onto a static spec
+// pond, whose read data is valid in the read cycle only (load latency 0; the
+// next cycle shows the next address). Every read came one cycle early and its
+// consumer got the next word (resnet_pond's kernel one reduction step ahead).
+// Delay the bank's reads by the difference. That keeps what each read returns
+// when every write is visible before the first read (a kernel or ROM bank);
+// otherwise the bank goes to a MEM, the level it was scheduled for.
+static void static_pond_match_scheduled_latency(CodegenOptions& options, UBuffer& bank, const string& bname,
+                                                schedule_info& info, string& config_mode) {
+  auto pc = loaded_regfile_collateral();
+  if (!pc || dense_rv_compile() || config_mode != "pond" || !info.buffer_load_latencies.count(bname)) {
+    return;
+  }
+  int d = info.load_latency(bname) - pc->load_latency;
+  if (d <= 0) {
+    return;
+  }
+  int first_read = INT_MAX, last_write = INT_MIN;
+  for (auto p : bank.get_out_ports()) {
+    first_read = min(first_read, to_int(lexminval(range(to_map(bank.schedule.at(p))))));
+  }
+  for (auto p : bank.get_in_ports()) {
+    last_write = max(last_write, to_int(lexmaxval(range(to_map(bank.schedule.at(p))))));
+  }
+  int visible = last_write + max(pc->store_latency, info.store_latency(bname));
+  if (!bank.get_in_ports().empty() && visible > first_read) {
+    config_mode = options.mem_hierarchy.at("mem").fetch_width == 1 ? "lake_dp" : "lake";
+    cout << "Static pond " << bank.name << ": scheduled with load latency " << info.load_latency(bname)
+         << " (pond " << pc->load_latency << ") and written until " << last_write << " (first read "
+         << first_read << "): mapped to a MEM (" << config_mode << ")" << endl;
+    return;
+  }
+  for (auto p : bank.get_out_ports()) {
+    bank.schedule[p] = to_umap(linear_schedule(to_map(bank.schedule.at(p)), {1}, d, false));
+  }
+  cout << "Static pond " << bank.name << ": reads delayed " << d << " cycle(s) (scheduled with load latency "
+       << info.load_latency(bname) << ", pond " << pc->load_latency << ")" << endl;
+}
+
 void lower_to_garnet_implementation(CodegenOptions& options,
         UBuffer& buf, UBufferImpl& impl, schedule_info& info) {
 
@@ -14917,6 +15047,7 @@ void lower_to_garnet_implementation(CodegenOptions& options,
 
     //Determine the config mode
     CGRAImpl.config_mode = buf.determine_config_mode(options, target_buf);
+    static_pond_match_scheduled_latency(options, target_buf, buf.name, info, CGRAImpl.config_mode);
 
     //If this is memory do double buffer optimization
     //rewrite the ubuffer IR and change the cgpl control
