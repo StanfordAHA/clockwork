@@ -1616,6 +1616,32 @@ void UBufferImpl::bank_merging_and_rewrite(CodegenOptions & options) {
     return ok;
   };
 
+  // 2026-11-24: SRAM slots of a merge group. The rate check above can pass while the
+  // group's streams cannot be given disjoint cycles: a stream whose row pitch is not a
+  // multiple of its fetch II visits several residues of the fetch period (fw8, pitch 68:
+  // two of the eight), so the write + 4 reads of unsharp's gray line buffer on a
+  // single-port fw8 tile do not fit, and merge_sram_with_different_outpt's collision
+  // search moves a reader to a negative start (a frame early: wrong data). Dry-run the
+  // merged SRAM schedule and keep the group apart if any access would start before
+  // cycle 0. Static compiles only, like the rate check; a group that merges cleanly is
+  // unchanged (the dry run does not touch the banks).
+  auto sram_slots_ok = [&](const vector<int>& banks) {
+    if (!static_compile || banks.size() < 2) return true;
+    vector<UBuffer> srams;
+    for (int b : banks)
+      for (auto it : lowering_info.at(b).sub_component)
+        if (contains(it.first, "sram")) srams.push_back(it.second);
+    if (srams.size() < 2) return true;
+    UBuffer m = merge_sram_with_different_outpt(srams, "sram_slot_check", is_dual_port);
+    int earliest = INT_MAX;
+    for (auto& it : m.schedule)
+      earliest = std::min(earliest, to_int(lexminval(range(to_map(it.second)))));
+    bool ok = earliest >= 0;
+    cout << "\tSRAM slots of banks " << banks << ": earliest access at cycle " << earliest
+         << " -> " << (ok ? "merge" : "keep separate (no free SRAM slot)") << endl;
+    return ok;
+  };
+
   // Check single_port constraints: if the target memory component is single-ported,
   // banks that have both readers and writers cannot be merged (they'd need simultaneous R+W)
   auto& single_port_map = options.mem_hierarchy.at("mem").single_port;
@@ -1634,7 +1660,8 @@ void UBufferImpl::bank_merging_and_rewrite(CodegenOptions & options) {
       while (true) {
         if(get_banks_inpts_num(merging_banks) > max_inpt ||
           get_banks_outpts_num(merging_banks) > max_outpt ||
-          !sram_bandwidth_ok(merging_banks)) {
+          !sram_bandwidth_ok(merging_banks) ||
+          !sram_slots_ok(merging_banks)) {
           auto last_bank = merging_banks.back();
           merging_banks.pop_back();
           //cout << merging_banks << endl;
